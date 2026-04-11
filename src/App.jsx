@@ -1,40 +1,24 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { initializeApp } from 'firebase/app';
-import { 
-  getAuth, 
-  signInAnonymously, 
-  signInWithCustomToken, 
-  onAuthStateChanged 
-} from 'firebase/auth';
-import { 
-  getFirestore, 
-  collection, 
-  doc, 
-  addDoc, 
-  getDocs, 
-  updateDoc, 
-  deleteDoc, 
-  query, 
-  onSnapshot,
-  serverTimestamp
-} from 'firebase/firestore';
-import { 
-  Home, 
-  Settings, 
-  Calendar, 
-  User, 
-  Plus, 
-  Trash2, 
-  Edit2, 
-  Search, 
-  ChevronRight,
-  ClipboardList,
-  LogOut,
-  Info,
-  AlertCircle
-} from 'lucide-react';
+import React, { useEffect, useMemo, useState } from "react";
+import { initializeApp } from "firebase/app";
+import {
+  getAuth,
+  signInAnonymously,
+  onAuthStateChanged,
+} from "firebase/auth";
+import {
+  getFirestore,
+  collection,
+  addDoc,
+  getDocs,
+  updateDoc,
+  deleteDoc,
+  doc,
+  query,
+  where,
+  orderBy,
+  serverTimestamp,
+} from "firebase/firestore";
 
-// --- Firebase 配置 ---
 const firebaseConfig = {
   apiKey: "AIzaSyCdaGbqhxBjkO43elRRtu8G7UWARU9xHmM",
   authDomain: "my-rental-app-59210.firebaseapp.com",
@@ -42,749 +26,1881 @@ const firebaseConfig = {
   storageBucket: "my-rental-app-59210.firebasestorage.app",
   messagingSenderId: "131975571748",
   appId: "1:131975571748:web:24ea4a464a8b0d97cdebb1",
-  measurementId: "G-X51XB29V66"
+  measurementId: "G-X51XB29V66",
 };
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
-const appId = typeof __app_id !== 'undefined' ? __app_id : '民宿訂房系統';
+
+const ROOM_STATUS = {
+  AVAILABLE: "可訂房",
+  BOOKED: "已被預訂",
+  DISABLED: "停用",
+};
+
+const BOOKING_STATUS = {
+  PENDING: "待確認",
+  CONFIRMED: "已確認",
+  CANCELED: "已取消",
+  CHECKED_IN: "已入住",
+};
+
+const ACTIVE_BOOKING_STATUSES = [
+  BOOKING_STATUS.PENDING,
+  BOOKING_STATUS.CONFIRMED,
+  BOOKING_STATUS.CHECKED_IN,
+];
+
+const initialRoomTypeForm = {
+  name: "",
+  description: "",
+};
+
+const initialRoomForm = {
+  typeId: "",
+  name: "",
+  description: "",
+  price: "",
+  capacity: "",
+  amenities: "",
+  status: ROOM_STATUS.AVAILABLE,
+};
+
+const initialBookingForm = {
+  customerName: "",
+  phone: "",
+  checkInDate: "",
+  checkOutDate: "",
+  guests: 1,
+  note: "",
+};
+
+function formatDate(dateStr) {
+  if (!dateStr) return "-";
+  return dateStr;
+}
+
+function isDateRangeOverlap(startA, endA, startB, endB) {
+  if (!startA || !endA || !startB || !endB) return false;
+  return new Date(startA) < new Date(endB) && new Date(startB) < new Date(endA);
+}
+
+function canCancelBooking(booking) {
+  if (!booking) return false;
+  if (
+    booking.status !== BOOKING_STATUS.PENDING &&
+    booking.status !== BOOKING_STATUS.CONFIRMED
+  ) {
+    return false;
+  }
+  const today = new Date();
+  const checkIn = new Date(booking.checkInDate);
+  today.setHours(0, 0, 0, 0);
+  checkIn.setHours(0, 0, 0, 0);
+  return checkIn >= today;
+}
+
+function toDateValue(value) {
+  if (!value) return "";
+  return value;
+}
 
 export default function App() {
-  const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [authError, setAuthError] = useState(null);
-  const [isAdmin, setIsAdmin] = useState(false);
-  const [view, setView] = useState('customer'); // 'customer' | 'admin'
+  const [authReady, setAuthReady] = useState(false);
+  const [currentUser, setCurrentUser] = useState(null);
+  const [roleView, setRoleView] = useState(
+    localStorage.getItem("bnb_role_view") || "customer"
+  );
+
+  const [roomTypes, setRoomTypes] = useState([]);
   const [rooms, setRooms] = useState([]);
   const [bookings, setBookings] = useState([]);
-  
-  // 搜尋與篩選狀態
-  const [searchDates, setSearchDates] = useState({ start: '', end: '' });
-  const [searchRoomType, setSearchRoomType] = useState('all');
 
-  // 初始化 Auth (遵循 Rule 3: Auth Before Queries)
+  const [searchTypeId, setSearchTypeId] = useState("");
+  const [searchCheckIn, setSearchCheckIn] = useState("");
+  const [searchCheckOut, setSearchCheckOut] = useState("");
+
+  const [selectedRoom, setSelectedRoom] = useState(null);
+  const [bookingForm, setBookingForm] = useState(initialBookingForm);
+  const [myOrdersOnly, setMyOrdersOnly] = useState(true);
+
+  const [roomTypeForm, setRoomTypeForm] = useState(initialRoomTypeForm);
+  const [editingRoomTypeId, setEditingRoomTypeId] = useState("");
+
+  const [roomForm, setRoomForm] = useState(initialRoomForm);
+  const [editingRoomId, setEditingRoomId] = useState("");
+
+  const [message, setMessage] = useState("");
+  const [submittingBooking, setSubmittingBooking] = useState(false);
+
   useEffect(() => {
-    const initAuth = async () => {
+    localStorage.setItem("bnb_role_view", roleView);
+  }, [roleView]);
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
       try {
-        // 優先嘗試使用 Custom Token，若失敗則回退至匿名登入
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          try {
-            await signInWithCustomToken(auth, __initial_auth_token);
-          } catch (tokenErr) {
-            console.warn("Custom token failed, falling back to anonymous:", tokenErr);
-            await signInAnonymously(auth);
-          }
+        if (user) {
+          setCurrentUser(user);
+          localStorage.setItem("bnb_auth_uid", user.uid);
         } else {
-          await signInAnonymously(auth);
+          const storedUid = localStorage.getItem("bnb_auth_uid");
+          if (!storedUid) {
+            const result = await signInAnonymously(auth);
+            setCurrentUser(result.user);
+            localStorage.setItem("bnb_auth_uid", result.user.uid);
+          } else {
+            const result = await signInAnonymously(auth);
+            setCurrentUser(result.user);
+            localStorage.setItem("bnb_auth_uid", result.user.uid);
+          }
         }
       } catch (error) {
-        console.error("Auth Critical Error:", error);
-        setAuthError("無法連線至身分驗證伺服器");
+        console.error("匿名登入失敗：", error);
+        setMessage("匿名登入失敗，請檢查 Firebase 設定。");
+      } finally {
+        setAuthReady(true);
       }
-    };
-
-    initAuth();
-
-    const unsubscribe = onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      setLoading(false);
     });
-    
+
     return () => unsubscribe();
   }, []);
 
-  // 監聽 Firestore 數據
   useEffect(() => {
-    // 確保有使用者才開始監聽數據
-    if (!user) return;
+    if (!authReady) return;
+    fetchAllData();
+  }, [authReady]);
 
-    const roomsRef = collection(db, 'artifacts', appId, 'public', 'data', 'rooms');
-    const bookingsRef = collection(db, 'artifacts', appId, 'public', 'data', 'bookings');
-
-    const unsubRooms = onSnapshot(roomsRef, (snapshot) => {
-      const roomData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      setRooms(roomData);
-    }, (err) => {
-      console.error("Rooms Stream Error:", err);
-    });
-
-    const unsubBookings = onSnapshot(bookingsRef, (snapshot) => {
-      const bookingData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      setBookings(bookingData);
-    }, (err) => {
-      console.error("Bookings Stream Error:", err);
-    });
-
-    return () => {
-      unsubRooms();
-      unsubBookings();
-    };
-  }, [user]);
-
-  // 管理者權限持久化
-  useEffect(() => {
-    const savedMode = localStorage.getItem('app_mode');
-    if (savedMode === 'admin') {
-      setIsAdmin(true);
-      setView('admin');
+  async function fetchAllData() {
+    setLoading(true);
+    try {
+      await Promise.all([fetchRoomTypes(), fetchRooms(), fetchBookings()]);
+    } catch (error) {
+      console.error("載入資料失敗：", error);
+      setMessage("資料載入失敗，請稍後再試。");
+    } finally {
+      setLoading(false);
     }
-  }, []);
+  }
 
-  const toggleAdminMode = () => {
-    const newMode = !isAdmin;
-    setIsAdmin(newMode);
-    localStorage.setItem('app_mode', newMode ? 'admin' : 'customer');
-    setView(newMode ? 'admin' : 'customer');
-  };
+  async function fetchRoomTypes() {
+    const snapshot = await getDocs(query(collection(db, "roomTypes"), orderBy("name", "asc")));
+    const data = snapshot.docs.map((item) => ({
+      id: item.id,
+      ...item.data(),
+    }));
+    setRoomTypes(data);
+  }
 
-  // 重疊日期檢查邏輯
-  const isRoomAvailable = (roomId, checkIn, checkOut, excludeBookingId = null) => {
-    if (!checkIn || !checkOut) return true;
-    const start = new Date(checkIn);
-    const end = new Date(checkOut);
-    
-    // 簡易日期校驗
-    if (start >= end) return false;
+  async function fetchRooms() {
+    const snapshot = await getDocs(query(collection(db, "rooms"), orderBy("createdAt", "desc")));
+    const data = snapshot.docs.map((item) => ({
+      id: item.id,
+      ...item.data(),
+    }));
+    setRooms(data);
+  }
 
-    return !bookings.some(booking => {
-      if (booking.id === excludeBookingId) return false;
-      if (booking.roomId !== roomId || booking.status === '已取消') return false;
-      
-      const bStart = new Date(booking.checkIn);
-      const bEnd = new Date(booking.checkOut);
-      
-      // 重疊公式: (StartA < EndB) && (EndA > StartB)
-      return (start < bEnd && end > bStart);
+  async function fetchBookings() {
+    const snapshot = await getDocs(
+      query(collection(db, "bookings"), orderBy("createdAt", "desc"))
+    );
+    const data = snapshot.docs.map((item) => ({
+      id: item.id,
+      ...item.data(),
+    }));
+    setBookings(data);
+  }
+
+  function getRoomTypeName(typeId) {
+    const type = roomTypes.find((item) => item.id === typeId);
+    return type?.name || "未分類房型";
+  }
+
+  function getRoomTypeDescription(typeId) {
+    const type = roomTypes.find((item) => item.id === typeId);
+    return type?.description || "";
+  }
+
+  const roomIdToTypeNameMap = useMemo(() => {
+    const map = {};
+    rooms.forEach((room) => {
+      map[room.id] = getRoomTypeName(room.typeId);
     });
-  };
-
-  // 載入與錯誤介面
-  if (loading) {
-    return (
-      <div className="fixed inset-0 flex items-center justify-center bg-gray-50 z-50">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
-          <p className="text-gray-600 font-medium text-lg">系統載入中...</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (authError) {
-    return (
-      <div className="fixed inset-0 flex items-center justify-center bg-red-50 p-4">
-        <div className="bg-white p-8 rounded-3xl shadow-xl max-w-sm text-center">
-          <AlertCircle className="text-red-500 mx-auto mb-4" size={48} />
-          <h2 className="text-xl font-bold mb-2">發生錯誤</h2>
-          <p className="text-gray-600 mb-6">{authError}</p>
-          <button onClick={() => window.location.reload()} className="w-full py-3 bg-red-600 text-white rounded-xl font-bold">重新整理</button>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="min-h-screen bg-gray-50 text-gray-900 font-sans pb-24 md:pb-8">
-      {/* 導覽列 */}
-      <nav className="sticky top-0 bg-white/80 backdrop-blur border-b border-gray-200 z-40 px-4 h-16 flex items-center justify-between shadow-sm">
-        <div className="flex items-center gap-2 cursor-pointer" onClick={() => setView('customer')}>
-          <Home className="text-blue-600" size={24} />
-          <h1 className="text-xl font-bold tracking-tight">小木屋民宿</h1>
-        </div>
-        <div className="flex items-center gap-2">
-          <button 
-            onClick={toggleAdminMode}
-            className={`px-4 py-2 rounded-xl text-xs font-bold transition-all shadow-sm ${
-              isAdmin ? 'bg-orange-100 text-orange-700' : 'bg-gray-100 text-gray-600'
-            }`}
-          >
-            {isAdmin ? '切換至顧客端' : '管理員入口'}
-          </button>
-        </div>
-      </nav>
-
-      <main className="max-w-6xl mx-auto p-4 md:p-8">
-        {isAdmin && view === 'admin' ? (
-          <AdminPanel rooms={rooms} bookings={bookings} appId={appId} />
-        ) : (
-          <CustomerPanel 
-            rooms={rooms} 
-            bookings={bookings} 
-            user={user} 
-            appId={appId}
-            searchDates={searchDates}
-            setSearchDates={setSearchDates}
-            searchRoomType={searchRoomType}
-            setSearchRoomType={setSearchRoomType}
-            isRoomAvailable={isRoomAvailable}
-          />
-        )}
-      </main>
-
-      {/* 底部浮動資訊 (用戶 ID 顯示) */}
-      <div className="fixed bottom-4 left-1/2 -translate-x-1/2 bg-white px-4 py-2 rounded-full shadow-lg border border-gray-100 text-[10px] text-gray-400 z-30">
-        您的用戶 ID: <span className="font-mono">{user?.uid}</span>
-      </div>
-    </div>
-  );
-}
-
-// --- 顧客端組件 ---
-function CustomerPanel({ rooms, bookings, user, appId, searchDates, setSearchDates, searchRoomType, setSearchRoomType, isRoomAvailable }) {
-  const [activeTab, setActiveTab] = useState('explore'); 
-  const [selectedRoom, setSelectedRoom] = useState(null);
+    return map;
+  }, [rooms, roomTypes]);
 
   const filteredRooms = useMemo(() => {
-    return rooms.filter(room => {
-      const matchesType = searchRoomType === 'all' || room.type === searchRoomType;
-      const available = isRoomAvailable(room.id, searchDates.start, searchDates.end);
-      const isEnabled = room.status !== '停用';
-      return matchesType && available && isEnabled;
-    });
-  }, [rooms, searchRoomType, searchDates, bookings, isRoomAvailable]);
+    return rooms.filter((room) => {
+      if (searchTypeId && room.typeId !== searchTypeId) return false;
+      if (room.status === ROOM_STATUS.DISABLED) return false;
 
-  const myBookings = bookings
-    .filter(b => b.userId === user?.uid)
-    .sort((a, b) => {
-      const timeA = a.createdAt?.seconds || 0;
-      const timeB = b.createdAt?.seconds || 0;
-      return timeB - timeA;
+      if (searchCheckIn && searchCheckOut) {
+        const hasConflict = bookings.some((booking) => {
+          return (
+            booking.roomId === room.id &&
+            ACTIVE_BOOKING_STATUSES.includes(booking.status) &&
+            isDateRangeOverlap(
+              searchCheckIn,
+              searchCheckOut,
+              booking.checkInDate,
+              booking.checkOutDate
+            )
+          );
+        });
+        if (hasConflict) return false;
+      }
+
+      return true;
     });
+  }, [rooms, bookings, searchTypeId, searchCheckIn, searchCheckOut]);
+
+  const customerOrders = useMemo(() => {
+    if (!currentUser) return [];
+    return bookings
+      .filter((booking) => {
+        if (!myOrdersOnly) return true;
+        return booking.userId === currentUser.uid;
+      })
+      .sort((a, b) => {
+        const dateA = new Date(a.checkInDate || a.createdAt?.seconds * 1000 || 0);
+        const dateB = new Date(b.checkInDate || b.createdAt?.seconds * 1000 || 0);
+        return dateA - dateB;
+      });
+  }, [bookings, currentUser, myOrdersOnly]);
+
+  async function handleSelectRoom(room) {
+    setSelectedRoom(room);
+    setBookingForm({
+      ...initialBookingForm,
+      checkInDate: searchCheckIn || "",
+      checkOutDate: searchCheckOut || "",
+      guests: 1,
+    });
+    setMessage("");
+  }
+
+  async function handleCreateBooking(e) {
+    e.preventDefault();
+    if (!selectedRoom || !currentUser) {
+      setMessage("請先選擇房間。");
+      return;
+    }
+
+    const { customerName, phone, checkInDate, checkOutDate, guests, note } = bookingForm;
+
+    if (!customerName || !phone || !checkInDate || !checkOutDate || !guests) {
+      setMessage("請完整填寫訂房資料。");
+      return;
+    }
+
+    if (new Date(checkInDate) >= new Date(checkOutDate)) {
+      setMessage("退房日期必須晚於入住日期。");
+      return;
+    }
+
+    if (Number(guests) > Number(selectedRoom.capacity)) {
+      setMessage("入住人數不可超過房間可入住人數。");
+      return;
+    }
+
+    if (selectedRoom.status !== ROOM_STATUS.AVAILABLE) {
+      setMessage("此房間目前不可預訂。");
+      return;
+    }
+
+    setSubmittingBooking(true);
+    setMessage("");
+
+    try {
+      const bookingCollection = collection(db, "bookings");
+
+      const overlapQuery = query(
+        bookingCollection,
+        where("roomId", "==", selectedRoom.id)
+      );
+
+      const overlapSnapshot = await getDocs(overlapQuery);
+      const existingBookings = overlapSnapshot.docs.map((item) => ({
+        id: item.id,
+        ...item.data(),
+      }));
+
+      const hasConflict = existingBookings.some((booking) => {
+        return (
+          ACTIVE_BOOKING_STATUSES.includes(booking.status) &&
+          isDateRangeOverlap(
+            checkInDate,
+            checkOutDate,
+            booking.checkInDate,
+            booking.checkOutDate
+          )
+        );
+      });
+
+      if (hasConflict) {
+        setMessage("該房間在此日期區間已有有效訂單，請重新選擇日期或房間。");
+        setSubmittingBooking(false);
+        return;
+      }
+
+      await addDoc(collection(db, "bookings"), {
+        userId: currentUser.uid,
+        customerName,
+        phone,
+        roomId: selectedRoom.id,
+        roomName: selectedRoom.name,
+        roomTypeId: selectedRoom.typeId,
+        roomTypeName: getRoomTypeName(selectedRoom.typeId),
+        price: Number(selectedRoom.price),
+        checkInDate,
+        checkOutDate,
+        guests: Number(guests),
+        note: note || "",
+        status: BOOKING_STATUS.PENDING,
+        createdAt: serverTimestamp(),
+      });
+
+      await fetchBookings();
+      setBookingForm(initialBookingForm);
+      setSelectedRoom(null);
+      setMessage("訂房申請已送出。");
+    } catch (error) {
+      console.error("建立訂單失敗：", error);
+      setMessage("建立訂單失敗，請稍後再試。");
+    } finally {
+      setSubmittingBooking(false);
+    }
+  }
+
+  async function handleCancelBooking(bookingId) {
+    try {
+      await updateDoc(doc(db, "bookings", bookingId), {
+        status: BOOKING_STATUS.CANCELED,
+      });
+      await fetchBookings();
+      setMessage("訂單已取消。");
+    } catch (error) {
+      console.error("取消訂單失敗：", error);
+      setMessage("取消訂單失敗。");
+    }
+  }
+
+  async function handleRoomTypeSubmit(e) {
+    e.preventDefault();
+    if (!roomTypeForm.name.trim()) {
+      setMessage("請輸入房型名稱。");
+      return;
+    }
+
+    try {
+      if (editingRoomTypeId) {
+        await updateDoc(doc(db, "roomTypes", editingRoomTypeId), {
+          name: roomTypeForm.name.trim(),
+          description: roomTypeForm.description.trim(),
+        });
+        setMessage("房型已更新。");
+      } else {
+        await addDoc(collection(db, "roomTypes"), {
+          name: roomTypeForm.name.trim(),
+          description: roomTypeForm.description.trim(),
+          createdAt: serverTimestamp(),
+        });
+        setMessage("房型已新增。");
+      }
+
+      setRoomTypeForm(initialRoomTypeForm);
+      setEditingRoomTypeId("");
+      await fetchRoomTypes();
+    } catch (error) {
+      console.error("房型儲存失敗：", error);
+      setMessage("房型儲存失敗。");
+    }
+  }
+
+  function handleEditRoomType(type) {
+    setEditingRoomTypeId(type.id);
+    setRoomTypeForm({
+      name: type.name || "",
+      description: type.description || "",
+    });
+  }
+
+  async function handleDeleteRoomType(typeId) {
+    const usedByRooms = rooms.some((room) => room.typeId === typeId);
+    if (usedByRooms) {
+      setMessage("此房型已被房間使用，請先刪除或修改相關房間。");
+      return;
+    }
+
+    try {
+      await deleteDoc(doc(db, "roomTypes", typeId));
+      await fetchRoomTypes();
+      setMessage("房型已刪除。");
+    } catch (error) {
+      console.error("刪除房型失敗：", error);
+      setMessage("刪除房型失敗。");
+    }
+  }
+
+  async function handleRoomSubmit(e) {
+    e.preventDefault();
+
+    if (
+      !roomForm.typeId ||
+      !roomForm.name.trim() ||
+      !roomForm.price ||
+      !roomForm.capacity
+    ) {
+      setMessage("請完整填寫房間資料。");
+      return;
+    }
+
+    try {
+      const payload = {
+        typeId: roomForm.typeId,
+        name: roomForm.name.trim(),
+        description: roomForm.description.trim(),
+        price: Number(roomForm.price),
+        capacity: Number(roomForm.capacity),
+        amenities: roomForm.amenities
+          .split(",")
+          .map((item) => item.trim())
+          .filter(Boolean),
+        status: roomForm.status,
+      };
+
+      if (editingRoomId) {
+        await updateDoc(doc(db, "rooms", editingRoomId), payload);
+        setMessage("房間已更新。");
+      } else {
+        await addDoc(collection(db, "rooms"), {
+          ...payload,
+          createdAt: serverTimestamp(),
+        });
+        setMessage("房間已新增。");
+      }
+
+      setRoomForm(initialRoomForm);
+      setEditingRoomId("");
+      await fetchRooms();
+    } catch (error) {
+      console.error("房間儲存失敗：", error);
+      setMessage("房間儲存失敗。");
+    }
+  }
+
+  function handleEditRoom(room) {
+    setEditingRoomId(room.id);
+    setRoomForm({
+      typeId: room.typeId || "",
+      name: room.name || "",
+      description: room.description || "",
+      price: room.price || "",
+      capacity: room.capacity || "",
+      amenities: Array.isArray(room.amenities) ? room.amenities.join(", ") : "",
+      status: room.status || ROOM_STATUS.AVAILABLE,
+    });
+  }
+
+  async function handleDeleteRoom(roomId) {
+    const hasBookings = bookings.some((booking) => booking.roomId === roomId);
+    if (hasBookings) {
+      setMessage("此房間已有訂單紀錄，若要停用請改成房間狀態：停用。");
+      return;
+    }
+
+    try {
+      await deleteDoc(doc(db, "rooms", roomId));
+      await fetchRooms();
+      setMessage("房間已刪除。");
+    } catch (error) {
+      console.error("刪除房間失敗：", error);
+      setMessage("刪除房間失敗。");
+    }
+  }
+
+  async function handleUpdateBookingStatus(bookingId, nextStatus) {
+    try {
+      await updateDoc(doc(db, "bookings", bookingId), {
+        status: nextStatus,
+      });
+      await fetchBookings();
+      setMessage("訂單狀態已更新。");
+    } catch (error) {
+      console.error("更新訂單狀態失敗：", error);
+      setMessage("更新訂單狀態失敗。");
+    }
+  }
+
+  async function handleUpdateRoomStatus(roomId, nextStatus) {
+    try {
+      await updateDoc(doc(db, "rooms", roomId), {
+        status: nextStatus,
+      });
+      await fetchRooms();
+      setMessage("房間狀態已更新。");
+    } catch (error) {
+      console.error("更新房間狀態失敗：", error);
+      setMessage("更新房間狀態失敗。");
+    }
+  }
+
+  function handleResetSearch() {
+    setSearchTypeId("");
+    setSearchCheckIn("");
+    setSearchCheckOut("");
+  }
+
+  async function seedDemoData() {
+    if (roomTypes.length > 0 || rooms.length > 0) {
+      setMessage("已有資料，略過範例建立。");
+      return;
+    }
+
+    try {
+      const typeA = await addDoc(collection(db, "roomTypes"), {
+        name: "雙人房",
+        description: "適合情侶或雙人旅客入住。",
+        createdAt: serverTimestamp(),
+      });
+
+      const typeB = await addDoc(collection(db, "roomTypes"), {
+        name: "家庭房",
+        description: "適合家庭或多人旅遊入住。",
+        createdAt: serverTimestamp(),
+      });
+
+      await addDoc(collection(db, "rooms"), {
+        typeId: typeA.id,
+        name: "晨光雙人房 201",
+        description: "採光明亮，附陽台與簡約設計。",
+        price: 2800,
+        capacity: 2,
+        amenities: ["Wi-Fi", "冷氣", "電視", "獨立衛浴"],
+        status: ROOM_STATUS.AVAILABLE,
+        createdAt: serverTimestamp(),
+      });
+
+      await addDoc(collection(db, "rooms"), {
+        typeId: typeA.id,
+        name: "木質雙人房 202",
+        description: "溫暖木質風格，適合放鬆度假。",
+        price: 3200,
+        capacity: 2,
+        amenities: ["Wi-Fi", "浴缸", "吹風機", "早餐"],
+        status: ROOM_STATUS.AVAILABLE,
+        createdAt: serverTimestamp(),
+      });
+
+      await addDoc(collection(db, "rooms"), {
+        typeId: typeB.id,
+        name: "家庭景觀房 301",
+        description: "寬敞空間，可入住 4 人。",
+        price: 4800,
+        capacity: 4,
+        amenities: ["Wi-Fi", "冰箱", "浴缸", "景觀窗"],
+        status: ROOM_STATUS.AVAILABLE,
+        createdAt: serverTimestamp(),
+      });
+
+      await fetchAllData();
+      setMessage("範例資料已建立。");
+    } catch (error) {
+      console.error("建立範例資料失敗：", error);
+      setMessage("建立範例資料失敗。");
+    }
+  }
+
+  if (loading || !authReady) {
+    return (
+      <>
+        <style>{globalStyles}</style>
+        <div className="fullscreen-loading">
+          <div className="loading-card">
+            <div className="spinner" />
+            <h2>系統載入中...</h2>
+            <p>正在初始化 Firebase 與訂房資料</p>
+          </div>
+        </div>
+      </>
+    );
+  }
 
   return (
-    <div className="space-y-6">
-      <div className="flex gap-4 border-b border-gray-200">
-        <button 
-          onClick={() => setActiveTab('explore')}
-          className={`pb-3 px-2 text-sm font-bold transition-all border-b-2 ${activeTab === 'explore' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-400'}`}
-        >
-          探索房型
-        </button>
-        <button 
-          onClick={() => setActiveTab('myBookings')}
-          className={`pb-3 px-2 text-sm font-bold transition-all border-b-2 ${activeTab === 'myBookings' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-400'}`}
-        >
-          我的訂單 ({myBookings.length})
-        </button>
-      </div>
+    <>
+      <style>{globalStyles}</style>
+      <div className="app-shell">
+        <header className="topbar">
+          <div>
+            <h1 className="brand-title">民宿訂房系統</h1>
+            <p className="brand-subtitle">
+              React + Firebase Firestore + 匿名登入
+            </p>
+          </div>
 
-      {activeTab === 'explore' ? (
-        <>
-          <div className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100 flex flex-wrap gap-4 items-end">
-            <div className="flex-1 min-w-[200px]">
-              <label className="block text-xs font-bold text-gray-400 mb-2 uppercase tracking-widest">入住日期</label>
-              <input 
-                type="date" 
-                className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl outline-none focus:ring-2 focus:ring-blue-500/20 transition-all"
-                value={searchDates.start}
-                onChange={(e) => setSearchDates(prev => ({ ...prev, start: e.target.value }))}
-              />
+          <div className="topbar-actions">
+            <div className="user-chip">
+              <span>目前身份：</span>
+              <strong>{roleView === "customer" ? "顧客端" : "管理者端"}</strong>
             </div>
-            <div className="flex-1 min-w-[200px]">
-              <label className="block text-xs font-bold text-gray-400 mb-2 uppercase tracking-widest">退房日期</label>
-              <input 
-                type="date" 
-                className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl outline-none focus:ring-2 focus:ring-blue-500/20 transition-all"
-                value={searchDates.end}
-                onChange={(e) => setSearchDates(prev => ({ ...prev, end: e.target.value }))}
-              />
+            <div className="user-chip">
+              <span>UID：</span>
+              <strong className="uid-text">
+                {currentUser?.uid ? currentUser.uid.slice(0, 10) + "..." : "-"}
+              </strong>
             </div>
-            <div className="flex-1 min-w-[150px]">
-              <label className="block text-xs font-bold text-gray-400 mb-2 uppercase tracking-widest">房型搜尋</label>
-              <select 
-                className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl outline-none"
-                value={searchRoomType}
-                onChange={(e) => setSearchRoomType(e.target.value)}
+            <div className="toggle-group">
+              <button
+                className={`tab-btn ${roleView === "customer" ? "active" : ""}`}
+                onClick={() => setRoleView("customer")}
               >
-                <option value="all">所有類型</option>
-                {[...new Set(rooms.map(r => r.type))].map(t => (
-                  <option key={t} value={t}>{t}</option>
-                ))}
-              </select>
+                顧客端
+              </button>
+              <button
+                className={`tab-btn ${roleView === "admin" ? "active" : ""}`}
+                onClick={() => setRoleView("admin")}
+              >
+                管理者端
+              </button>
             </div>
           </div>
+        </header>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-            {filteredRooms.length > 0 ? filteredRooms.map(room => (
-              <div key={room.id} className="bg-white rounded-3xl overflow-hidden shadow-sm border border-gray-100 hover:shadow-xl hover:-translate-y-1 transition-all duration-300">
-                <div className="aspect-[4/3] bg-gradient-to-br from-gray-100 to-gray-200 relative">
-                  <div className="absolute top-4 left-4 bg-white/90 backdrop-blur px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest text-blue-600 shadow-sm">
-                    {room.type}
-                  </div>
-                  <div className="absolute inset-0 flex items-center justify-center text-gray-400 font-medium">
-                    
-                  </div>
-                </div>
-                <div className="p-6">
-                  <div className="flex justify-between items-center mb-3">
-                    <h3 className="text-xl font-bold">{room.name}</h3>
-                    <div className="text-blue-600 font-black text-lg">${room.price} <span className="text-[10px] text-gray-400 font-normal uppercase">/ Night</span></div>
-                  </div>
-                  <p className="text-sm text-gray-500 mb-4 line-clamp-2 leading-relaxed">{room.desc || '暫無房間描述'}</p>
-                  <div className="flex items-center gap-3 mb-6">
-                    <div className="flex items-center gap-1.5 text-xs font-bold text-gray-600 bg-gray-100 px-3 py-1.5 rounded-full">
-                      <User size={14} /> {room.capacity} 人入住
-                    </div>
-                  </div>
-                  <button 
-                    onClick={() => setSelectedRoom(room)}
-                    className="w-full py-4 bg-blue-600 text-white rounded-2xl font-bold hover:bg-blue-700 transition-all shadow-lg shadow-blue-100 active:scale-[0.98]"
+        {message && <div className="message-banner">{message}</div>}
+
+        {roleView === "customer" ? (
+          <main className="main-grid">
+            <section className="panel">
+              <div className="panel-header">
+                <h2>搜尋空房</h2>
+                <button className="secondary-btn" onClick={handleResetSearch}>
+                  清除搜尋
+                </button>
+              </div>
+
+              <div className="form-grid">
+                <div className="form-item">
+                  <label>房型</label>
+                  <select
+                    value={searchTypeId}
+                    onChange={(e) => setSearchTypeId(e.target.value)}
                   >
-                    立即查看並預訂
-                  </button>
-                </div>
-              </div>
-            )) : (
-              <div className="col-span-full py-32 text-center text-gray-500 bg-white rounded-3xl border-2 border-dashed border-gray-100">
-                <Search size={48} className="mx-auto mb-4 opacity-10" />
-                <p className="text-lg font-medium">目前沒有符合條件的空房</p>
-                <p className="text-sm opacity-60">請嘗試更改日期或房型搜尋。</p>
-              </div>
-            )}
-          </div>
-        </>
-      ) : (
-        <div className="space-y-4">
-          {myBookings.length > 0 ? myBookings.map(booking => (
-            <div key={booking.id} className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100 flex flex-col md:flex-row justify-between gap-6 hover:shadow-md transition-all">
-              <div className="space-y-2">
-                <div className="flex items-center gap-3">
-                  <h4 className="font-bold text-xl">{booking.roomName}</h4>
-                  <span className={`px-3 py-1 rounded-full text-[10px] font-black uppercase ${
-                    booking.status === '待確認' ? 'bg-yellow-100 text-yellow-700' :
-                    booking.status === '已確認' ? 'bg-green-100 text-green-700' :
-                    booking.status === '已取消' ? 'bg-gray-100 text-gray-500' : 'bg-blue-100 text-blue-700'
-                  }`}>
-                    {booking.status}
-                  </span>
-                </div>
-                <div className="flex flex-wrap gap-4 text-sm text-gray-600 font-medium">
-                  <div className="flex items-center gap-1.5 bg-gray-50 px-3 py-1 rounded-lg">
-                    <Calendar size={14} className="text-blue-500" /> {booking.checkIn} → {booking.checkOut}
-                  </div>
-                  <div className="flex items-center gap-1.5 bg-gray-50 px-3 py-1 rounded-lg">
-                    <User size={14} className="text-blue-500" /> {booking.guestCount} 人
-                  </div>
-                </div>
-              </div>
-              <div className="flex items-center justify-between md:justify-end gap-6 border-t md:border-none pt-4 md:pt-0">
-                <div className="text-right">
-                  <div className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Total Price</div>
-                  <div className="font-black text-2xl text-blue-600">${booking.totalPrice}</div>
-                </div>
-                {(booking.status === '待確認' || booking.status === '已確認') && (
-                  <button 
-                    onClick={async () => {
-                      if (window.confirm('確定要取消這筆訂單嗎？')) {
-                        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id), {
-                          status: '已取消'
-                        });
-                      }
-                    }}
-                    className="px-6 py-3 text-sm font-bold text-red-600 bg-red-50 rounded-2xl hover:bg-red-100 transition-all active:scale-95"
-                  >
-                    取消預訂
-                  </button>
-                )}
-              </div>
-            </div>
-          )) : (
-            <div className="py-32 text-center text-gray-400 bg-white rounded-3xl border border-gray-100 shadow-inner">
-               <ClipboardList size={48} className="mx-auto mb-4 opacity-10" />
-               <p className="font-medium">尚無任何訂單紀錄</p>
-            </div>
-          )}
-        </div>
-      )}
-
-      {selectedRoom && (
-        <BookingModal 
-          room={selectedRoom} 
-          onClose={() => setSelectedRoom(null)} 
-          user={user} 
-          appId={appId}
-          isRoomAvailable={isRoomAvailable}
-          initialDates={searchDates}
-        />
-      )}
-    </div>
-  );
-}
-
-// --- 管理者端組件 ---
-function AdminPanel({ rooms, bookings, appId }) {
-  const [activeTab, setActiveTab] = useState('bookings'); 
-  const [editRoom, setEditRoom] = useState(null);
-
-  const sortedBookings = [...bookings].sort((a, b) => {
-    const timeA = a.createdAt?.seconds || 0;
-    const timeB = b.createdAt?.seconds || 0;
-    return timeB - timeA;
-  });
-
-  return (
-    <div className="space-y-8 animate-in fade-in duration-500">
-      <div className="flex flex-wrap justify-between items-center gap-4">
-        <div>
-          <h2 className="text-3xl font-black">管理中心</h2>
-          <p className="text-gray-400 text-sm font-medium">監控預訂、管理房源與訂單狀態</p>
-        </div>
-        <div className="flex bg-gray-200 p-1.5 rounded-2xl shadow-inner">
-          <button 
-            onClick={() => setActiveTab('bookings')}
-            className={`px-6 py-2 rounded-xl text-sm font-bold transition-all ${activeTab === 'bookings' ? 'bg-white text-blue-600 shadow-md' : 'text-gray-500'}`}
-          >
-            訂單流水
-          </button>
-          <button 
-            onClick={() => setActiveTab('rooms')}
-            className={`px-6 py-2 rounded-xl text-sm font-bold transition-all ${activeTab === 'rooms' ? 'bg-white text-blue-600 shadow-md' : 'text-gray-500'}`}
-          >
-            房源配置
-          </button>
-        </div>
-      </div>
-
-      {activeTab === 'bookings' ? (
-        <div className="grid grid-cols-1 gap-4">
-          {sortedBookings.map(booking => (
-            <div key={booking.id} className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100 flex flex-col md:flex-row gap-6">
-              <div className="flex-1 space-y-4">
-                <div className="flex flex-wrap items-center gap-3">
-                  <div className="text-xl font-black text-gray-800">{booking.customerName}</div>
-                  <span className="text-xs font-mono text-gray-300 bg-gray-50 px-2 py-1 rounded">ID: {booking.id.slice(-6).toUpperCase()}</span>
-                  <select 
-                    value={booking.status}
-                    onChange={async (e) => {
-                      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id), {
-                        status: e.target.value
-                      });
-                    }}
-                    className={`ml-auto md:ml-0 px-4 py-2 rounded-xl text-xs font-black outline-none border-none shadow-sm cursor-pointer transition-all ${
-                      booking.status === '待確認' ? 'bg-yellow-100 text-yellow-700' :
-                      booking.status === '已確認' ? 'bg-green-100 text-green-700' :
-                      booking.status === '已取消' ? 'bg-gray-100 text-gray-500' : 'bg-blue-100 text-blue-700'
-                    }`}
-                  >
-                    <option value="待確認">待確認</option>
-                    <option value="已確認">已確認</option>
-                    <option value="已入住">已入住</option>
-                    <option value="已取消">已取消</option>
+                    <option value="">全部房型</option>
+                    {roomTypes.map((type) => (
+                      <option key={type.id} value={type.id}>
+                        {type.name}
+                      </option>
+                    ))}
                   </select>
                 </div>
-                
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                  <div className="space-y-1">
-                    <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest">房源</p>
-                    <p className="font-bold text-gray-700">{booking.roomName}</p>
-                  </div>
-                  <div className="space-y-1">
-                    <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest">期間</p>
-                    <p className="font-bold text-gray-700 text-sm">{booking.checkIn} 至 {booking.checkOut}</p>
-                  </div>
-                  <div className="space-y-1">
-                    <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest">聯絡資訊</p>
-                    <p className="font-bold text-gray-700 text-sm">{booking.customerPhone}</p>
-                  </div>
+
+                <div className="form-item">
+                  <label>入住日期</label>
+                  <input
+                    type="date"
+                    value={searchCheckIn}
+                    onChange={(e) => setSearchCheckIn(e.target.value)}
+                  />
                 </div>
 
-                {booking.note && (
-                  <div className="bg-orange-50/50 p-3 rounded-xl text-sm border border-orange-100/50">
-                    <span className="font-bold text-orange-700 mr-2">備註:</span>
-                    <span className="text-orange-900/70">{booking.note}</span>
+                <div className="form-item">
+                  <label>退房日期</label>
+                  <input
+                    type="date"
+                    value={searchCheckOut}
+                    onChange={(e) => setSearchCheckOut(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              <div className="hint-text">
+                可依入住日期、退房日期與房型搜尋可預訂房間。
+              </div>
+            </section>
+
+            <section className="panel">
+              <div className="panel-header">
+                <h2>房型與房間列表</h2>
+                <span className="counter-badge">共 {filteredRooms.length} 間</span>
+              </div>
+
+              <div className="card-grid">
+                {filteredRooms.length === 0 ? (
+                  <div className="empty-state">
+                    <p>目前沒有符合條件的空房。</p>
                   </div>
+                ) : (
+                  filteredRooms.map((room) => (
+                    <div className="room-card" key={room.id}>
+                      <div className="card-top">
+                        <div>
+                          <div className="type-badge">{getRoomTypeName(room.typeId)}</div>
+                          <h3>{room.name}</h3>
+                        </div>
+                        <span
+                          className={`status-pill ${
+                            room.status === ROOM_STATUS.AVAILABLE
+                              ? "status-available"
+                              : room.status === ROOM_STATUS.BOOKED
+                              ? "status-booked"
+                              : "status-disabled"
+                          }`}
+                        >
+                          {room.status}
+                        </span>
+                      </div>
+
+                      <div className="room-meta-list">
+                        <div>價格：NT$ {room.price}</div>
+                        <div>可入住人數：{room.capacity} 人</div>
+                      </div>
+
+                      <p className="room-desc">
+                        {room.description || "尚未填寫房間描述"}
+                      </p>
+
+                      <button
+                        className="primary-btn"
+                        onClick={() => handleSelectRoom(room)}
+                      >
+                        查看詳情 / 我要預訂
+                      </button>
+                    </div>
+                  ))
                 )}
               </div>
-              <div className="md:w-32 flex md:flex-col items-center justify-between md:justify-center md:border-l border-gray-100 md:pl-6 gap-2">
-                <div className="text-right md:text-center w-full">
-                  <p className="text-[10px] font-black text-gray-400 uppercase">Total</p>
-                  <p className="text-2xl font-black text-blue-600">${booking.totalPrice}</p>
+            </section>
+
+            <section className="panel">
+              <div className="panel-header">
+                <h2>房間詳細資訊</h2>
+              </div>
+
+              {!selectedRoom ? (
+                <div className="empty-state">
+                  <p>請先從房間列表選擇一間房。</p>
+                </div>
+              ) : (
+                <div className="detail-layout">
+                  <div className="detail-card">
+                    <h3>{selectedRoom.name}</h3>
+                    <div className="detail-row">
+                      <span>房型名稱</span>
+                      <strong>{getRoomTypeName(selectedRoom.typeId)}</strong>
+                    </div>
+                    <div className="detail-row">
+                      <span>房間名稱</span>
+                      <strong>{selectedRoom.name}</strong>
+                    </div>
+                    <div className="detail-row">
+                      <span>房型描述</span>
+                      <strong>{getRoomTypeDescription(selectedRoom.typeId) || "-"}</strong>
+                    </div>
+                    <div className="detail-row">
+                      <span>房間描述</span>
+                      <strong>{selectedRoom.description || "-"}</strong>
+                    </div>
+                    <div className="detail-row">
+                      <span>價格</span>
+                      <strong>NT$ {selectedRoom.price}</strong>
+                    </div>
+                    <div className="detail-row">
+                      <span>可入住人數</span>
+                      <strong>{selectedRoom.capacity} 人</strong>
+                    </div>
+                    <div className="detail-row">
+                      <span>設施</span>
+                      <strong>
+                        {Array.isArray(selectedRoom.amenities) && selectedRoom.amenities.length > 0
+                          ? selectedRoom.amenities.join("、")
+                          : "-"}
+                      </strong>
+                    </div>
+                    <div className="detail-row">
+                      <span>房間狀態</span>
+                      <strong>{selectedRoom.status}</strong>
+                    </div>
+                  </div>
+
+                  <form className="detail-card" onSubmit={handleCreateBooking}>
+                    <h3>提交訂房申請</h3>
+
+                    <div className="form-grid">
+                      <div className="form-item">
+                        <label>姓名</label>
+                        <input
+                          type="text"
+                          value={bookingForm.customerName}
+                          onChange={(e) =>
+                            setBookingForm((prev) => ({
+                              ...prev,
+                              customerName: e.target.value,
+                            }))
+                          }
+                          placeholder="請輸入姓名"
+                        />
+                      </div>
+
+                      <div className="form-item">
+                        <label>電話</label>
+                        <input
+                          type="text"
+                          value={bookingForm.phone}
+                          onChange={(e) =>
+                            setBookingForm((prev) => ({
+                              ...prev,
+                              phone: e.target.value,
+                            }))
+                          }
+                          placeholder="請輸入電話"
+                        />
+                      </div>
+
+                      <div className="form-item">
+                        <label>入住日期</label>
+                        <input
+                          type="date"
+                          value={toDateValue(bookingForm.checkInDate)}
+                          onChange={(e) =>
+                            setBookingForm((prev) => ({
+                              ...prev,
+                              checkInDate: e.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+
+                      <div className="form-item">
+                        <label>退房日期</label>
+                        <input
+                          type="date"
+                          value={toDateValue(bookingForm.checkOutDate)}
+                          onChange={(e) =>
+                            setBookingForm((prev) => ({
+                              ...prev,
+                              checkOutDate: e.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+
+                      <div className="form-item">
+                        <label>入住人數</label>
+                        <input
+                          type="number"
+                          min="1"
+                          max={selectedRoom.capacity || 1}
+                          value={bookingForm.guests}
+                          onChange={(e) =>
+                            setBookingForm((prev) => ({
+                              ...prev,
+                              guests: e.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+
+                      <div className="form-item form-item-full">
+                        <label>備註</label>
+                        <textarea
+                          rows="4"
+                          value={bookingForm.note}
+                          onChange={(e) =>
+                            setBookingForm((prev) => ({
+                              ...prev,
+                              note: e.target.value,
+                            }))
+                          }
+                          placeholder="例如：是否需要加床、預計到店時間..."
+                        />
+                      </div>
+                    </div>
+
+                    <button
+                      type="submit"
+                      className="primary-btn"
+                      disabled={submittingBooking}
+                    >
+                      {submittingBooking ? "送出中..." : "送出訂房申請"}
+                    </button>
+                  </form>
+                </div>
+              )}
+            </section>
+
+            <section className="panel">
+              <div className="panel-header">
+                <h2>我的訂單</h2>
+                <div className="inline-actions">
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={myOrdersOnly}
+                      onChange={(e) => setMyOrdersOnly(e.target.checked)}
+                    />
+                    只看我的訂單
+                  </label>
                 </div>
               </div>
-            </div>
-          ))}
-          {sortedBookings.length === 0 && (
-             <div className="py-24 text-center text-gray-400 bg-white rounded-3xl border border-gray-100">
-               <ClipboardList size={48} className="mx-auto mb-4 opacity-10" />
-               <p>目前尚無任何訂單</p>
-             </div>
-          )}
-        </div>
-      ) : (
-        <div className="space-y-6">
-          <button 
-            onClick={() => setEditRoom({})}
-            className="flex items-center gap-2 bg-blue-600 text-white px-6 py-3 rounded-2xl font-bold hover:bg-blue-700 transition-all shadow-lg shadow-blue-200"
-          >
-            <Plus size={20} /> 新增民宿房源
-          </button>
-          
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            {rooms.map(room => (
-              <div key={room.id} className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm flex flex-col md:flex-row justify-between items-start md:items-center gap-4 group">
-                <div className="flex-1">
-                  <div className="flex items-center gap-3 mb-2">
-                    <h4 className="font-black text-xl text-gray-800">{room.name}</h4>
-                    <span className="text-[10px] font-black bg-gray-100 px-2 py-0.5 rounded-full text-gray-500 uppercase tracking-wider">{room.type}</span>
+
+              <div className="card-grid">
+                {customerOrders.length === 0 ? (
+                  <div className="empty-state">
+                    <p>目前沒有可顯示的訂單。</p>
                   </div>
-                  <div className="text-sm font-medium text-gray-500 flex items-center gap-4">
-                    <span>價格: <span className="text-blue-600 font-bold">${room.price}</span></span>
-                    <span>容量: <span className="font-bold text-gray-700">{room.capacity} 人</span></span>
-                  </div>
-                  <div className={`text-[10px] font-black mt-3 flex items-center gap-1.5 ${room.status === '停用' ? 'text-red-500' : 'text-green-500'}`}>
-                    <span className={`w-2 h-2 rounded-full ${room.status === '停用' ? 'bg-red-500' : 'bg-green-500'} animate-pulse`}></span>
-                    {room.status || '可訂房'}
-                  </div>
-                </div>
-                <div className="flex gap-2 w-full md:w-auto">
-                  <button onClick={() => setEditRoom(room)} className="flex-1 md:flex-none p-3 text-gray-400 bg-gray-50 hover:text-blue-600 hover:bg-blue-50 rounded-2xl transition-all">
-                    <Edit2 size={20} className="mx-auto" />
-                  </button>
-                  <button 
-                    onClick={async () => {
-                      if (window.confirm(`確定要刪除 ${room.name} 嗎？此操作不可恢復。`)) {
-                        await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'rooms', room.id));
+                ) : (
+                  customerOrders.map((booking) => (
+                    <div className="order-card" key={booking.id}>
+                      <div className="card-top">
+                        <div>
+                          <div className="type-badge">
+                            {booking.roomTypeName || roomIdToTypeNameMap[booking.roomId] || "房型"}
+                          </div>
+                          <h3>{booking.roomName}</h3>
+                        </div>
+                        <span
+                          className={`status-pill ${
+                            booking.status === BOOKING_STATUS.CANCELED
+                              ? "status-disabled"
+                              : booking.status === BOOKING_STATUS.CHECKED_IN
+                              ? "status-booked"
+                              : "status-available"
+                          }`}
+                        >
+                          {booking.status}
+                        </span>
+                      </div>
+
+                      <div className="detail-row">
+                        <span>姓名</span>
+                        <strong>{booking.customerName}</strong>
+                      </div>
+                      <div className="detail-row">
+                        <span>電話</span>
+                        <strong>{booking.phone}</strong>
+                      </div>
+                      <div className="detail-row">
+                        <span>入住日期</span>
+                        <strong>{formatDate(booking.checkInDate)}</strong>
+                      </div>
+                      <div className="detail-row">
+                        <span>退房日期</span>
+                        <strong>{formatDate(booking.checkOutDate)}</strong>
+                      </div>
+                      <div className="detail-row">
+                        <span>入住人數</span>
+                        <strong>{booking.guests} 人</strong>
+                      </div>
+                      <div className="detail-row">
+                        <span>價格</span>
+                        <strong>NT$ {booking.price}</strong>
+                      </div>
+                      <div className="detail-row">
+                        <span>備註</span>
+                        <strong>{booking.note || "-"}</strong>
+                      </div>
+
+                      {canCancelBooking(booking) && booking.userId === currentUser?.uid && (
+                        <button
+                          className="danger-btn"
+                          onClick={() => handleCancelBooking(booking.id)}
+                        >
+                          取消訂單
+                        </button>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+            </section>
+          </main>
+        ) : (
+          <main className="main-grid">
+            <section className="panel">
+              <div className="panel-header">
+                <h2>管理功能</h2>
+                <button className="secondary-btn" onClick={seedDemoData}>
+                  建立範例資料
+                </button>
+              </div>
+              <div className="hint-text">
+                可管理房型、房間、訂單與房間狀態。
+              </div>
+            </section>
+
+            <section className="panel">
+              <div className="panel-header">
+                <h2>{editingRoomTypeId ? "編輯房型" : "新增房型"}</h2>
+              </div>
+              <form onSubmit={handleRoomTypeSubmit}>
+                <div className="form-grid">
+                  <div className="form-item">
+                    <label>房型名稱</label>
+                    <input
+                      type="text"
+                      value={roomTypeForm.name}
+                      onChange={(e) =>
+                        setRoomTypeForm((prev) => ({
+                          ...prev,
+                          name: e.target.value,
+                        }))
                       }
-                    }}
-                    className="flex-1 md:flex-none p-3 text-gray-400 bg-gray-50 hover:text-red-600 hover:bg-red-50 rounded-2xl transition-all"
-                  >
-                    <Trash2 size={20} className="mx-auto" />
-                  </button>
+                      placeholder="例如：雙人房、家庭房"
+                    />
+                  </div>
+                  <div className="form-item form-item-full">
+                    <label>房型描述</label>
+                    <textarea
+                      rows="3"
+                      value={roomTypeForm.description}
+                      onChange={(e) =>
+                        setRoomTypeForm((prev) => ({
+                          ...prev,
+                          description: e.target.value,
+                        }))
+                      }
+                      placeholder="請輸入房型說明"
+                    />
+                  </div>
                 </div>
+
+                <div className="inline-actions">
+                  <button type="submit" className="primary-btn">
+                    {editingRoomTypeId ? "更新房型" : "新增房型"}
+                  </button>
+                  {editingRoomTypeId && (
+                    <button
+                      type="button"
+                      className="secondary-btn"
+                      onClick={() => {
+                        setEditingRoomTypeId("");
+                        setRoomTypeForm(initialRoomTypeForm);
+                      }}
+                    >
+                      取消編輯
+                    </button>
+                  )}
+                </div>
+              </form>
+
+              <div className="simple-list">
+                {roomTypes.map((type) => (
+                  <div key={type.id} className="simple-list-item">
+                    <div>
+                      <strong>{type.name}</strong>
+                      <p>{type.description || "無描述"}</p>
+                    </div>
+                    <div className="inline-actions">
+                      <button className="secondary-btn" onClick={() => handleEditRoomType(type)}>
+                        編輯
+                      </button>
+                      <button className="danger-btn" onClick={() => handleDeleteRoomType(type.id)}>
+                        刪除
+                      </button>
+                    </div>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
-        </div>
-      )}
+            </section>
 
-      {editRoom && (
-        <RoomEditor room={editRoom} onClose={() => setEditRoom(null)} appId={appId} />
-      )}
-    </div>
-  );
-}
-
-// --- 預訂 Modal ---
-function BookingModal({ room, onClose, user, appId, isRoomAvailable, initialDates }) {
-  const [formData, setFormData] = useState({
-    name: '',
-    phone: '',
-    checkIn: initialDates.start || '',
-    checkOut: initialDates.end || '',
-    guestCount: 1,
-    note: ''
-  });
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [error, setError] = useState('');
-
-  const calculateTotal = () => {
-    if (!formData.checkIn || !formData.checkOut) return 0;
-    const start = new Date(formData.checkIn);
-    const end = new Date(formData.checkOut);
-    const diffTime = end.getTime() - start.getTime();
-    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-    return diffDays > 0 ? diffDays * room.price : 0;
-  };
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    setError('');
-    
-    if (new Date(formData.checkIn) >= new Date(formData.checkOut)) {
-      setError('退房日期必須晚於入住日期');
-      return;
-    }
-
-    if (!isRoomAvailable(room.id, formData.checkIn, formData.checkOut)) {
-      setError('該時段房間已被預訂，請選擇其他日期');
-      return;
-    }
-
-    setIsSubmitting(true);
-    try {
-      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'bookings'), {
-        customerName: formData.name,
-        customerPhone: formData.phone,
-        checkIn: formData.checkIn,
-        checkOut: formData.checkOut,
-        guestCount: Number(formData.guestCount),
-        note: formData.note,
-        roomId: room.id,
-        roomName: room.name,
-        roomType: room.type,
-        totalPrice: calculateTotal(),
-        userId: user.uid,
-        status: '待確認',
-        createdAt: serverTimestamp()
-      });
-      onClose();
-      // 使用視窗模態框替代原生 alert 以符合最佳實踐
-      setTimeout(() => alert('預訂申請已成功送出！'), 100);
-    } catch (err) {
-      console.error(err);
-      setError('系統錯誤，請稍後再試');
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  return (
-    <div className="fixed inset-0 bg-gray-900/60 backdrop-blur-md z-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-[2rem] w-full max-w-xl max-h-[90vh] overflow-y-auto shadow-2xl animate-in zoom-in-95 duration-200">
-        <div className="p-8 border-b border-gray-100 sticky top-0 bg-white/80 backdrop-blur z-10 flex justify-between items-center">
-          <div>
-            <h2 className="text-2xl font-black text-gray-800">預訂房源</h2>
-            <p className="text-sm text-gray-400 font-medium">{room.name} ({room.type})</p>
-          </div>
-          <button onClick={onClose} className="p-2 bg-gray-50 text-gray-400 hover:text-gray-600 rounded-full transition-all">✕</button>
-        </div>
-        <form onSubmit={handleSubmit} className="p-8 space-y-8">
-          <div className="bg-blue-50/50 p-5 rounded-[1.5rem] flex items-start gap-4 border border-blue-100/50">
-            <Info className="text-blue-600 mt-1 shrink-0" size={20} />
-            <div className="text-sm">
-              <div className="font-black text-blue-900 mb-1 tracking-wider uppercase">房型規則與設施</div>
-              <p className="text-blue-800/70 leading-relaxed">
-                最大入住人數: {room.capacity} 人 | 價格: ${room.price} / 晚<br/>
-                {room.amenities || '提供 Wi-Fi、空調、衛浴設施、清潔備品。'}
-              </p>
-            </div>
-          </div>
-
-          {error && <div className="bg-red-50 border border-red-100 text-red-600 p-4 rounded-2xl text-sm font-bold flex items-center gap-2">
-            <AlertCircle size={18} /> {error}
-          </div>}
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-            <div>
-              <label className="block text-[10px] font-black text-gray-400 mb-2 uppercase tracking-widest">入住日期</label>
-              <input required type="date" value={formData.checkIn} onChange={e => setFormData({...formData, checkIn: e.target.value})} className="w-full p-3.5 bg-gray-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-blue-500/20" />
-            </div>
-            <div>
-              <label className="block text-[10px] font-black text-gray-400 mb-2 uppercase tracking-widest">退房日期</label>
-              <input required type="date" value={formData.checkOut} onChange={e => setFormData({...formData, checkOut: e.target.value})} className="w-full p-3.5 bg-gray-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-blue-500/20" />
-            </div>
-            <div>
-              <label className="block text-[10px] font-black text-gray-400 mb-2 uppercase tracking-widest">聯絡姓名</label>
-              <input required type="text" placeholder="請輸入姓名" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className="w-full p-3.5 bg-gray-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-blue-500/20" />
-            </div>
-            <div>
-              <label className="block text-[10px] font-black text-gray-400 mb-2 uppercase tracking-widest">聯絡電話</label>
-              <input required type="tel" placeholder="請輸入電話" value={formData.phone} onChange={e => setFormData({...formData, phone: e.target.value})} className="w-full p-3.5 bg-gray-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-blue-500/20" />
-            </div>
-            <div>
-              <label className="block text-[10px] font-black text-gray-400 mb-2 uppercase tracking-widest">入住人數</label>
-              <input required type="number" min="1" max={room.capacity} value={formData.guestCount} onChange={e => setFormData({...formData, guestCount: e.target.value})} className="w-full p-3.5 bg-gray-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-blue-500/20" />
-            </div>
-          </div>
-          
-          <div>
-            <label className="block text-[10px] font-black text-gray-400 mb-2 uppercase tracking-widest">特殊需求備註</label>
-            <textarea rows="3" value={formData.note} onChange={e => setFormData({...formData, note: e.target.value})} className="w-full p-3.5 bg-gray-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-blue-500/20 resize-none" placeholder="如有過敏、抵達時間或其他需求請在此留言..."></textarea>
-          </div>
-
-          <div className="pt-8 border-t border-gray-50 flex flex-col gap-6">
-            <div className="flex justify-between items-center">
-              <div>
-                <div className="text-[10px] font-black text-gray-400 uppercase tracking-widest">訂單總金額</div>
-                <div className="text-sm text-gray-400 font-medium">包含所有服務費用</div>
+            <section className="panel">
+              <div className="panel-header">
+                <h2>{editingRoomId ? "編輯房間" : "新增房間"}</h2>
               </div>
-              <div className="text-4xl font-black text-blue-600">${calculateTotal()}</div>
-            </div>
-            <button 
-              disabled={isSubmitting}
-              className="w-full py-5 bg-blue-600 text-white rounded-[1.5rem] font-black text-lg hover:bg-blue-700 transition-all shadow-xl shadow-blue-200 disabled:opacity-50 active:scale-95"
-            >
-              {isSubmitting ? '正在處理訂單...' : '確認提交預訂'}
-            </button>
-          </div>
-        </form>
+              <form onSubmit={handleRoomSubmit}>
+                <div className="form-grid">
+                  <div className="form-item">
+                    <label>房型</label>
+                    <select
+                      value={roomForm.typeId}
+                      onChange={(e) =>
+                        setRoomForm((prev) => ({
+                          ...prev,
+                          typeId: e.target.value,
+                        }))
+                      }
+                    >
+                      <option value="">請選擇房型</option>
+                      {roomTypes.map((type) => (
+                        <option key={type.id} value={type.id}>
+                          {type.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="form-item">
+                    <label>房間名稱</label>
+                    <input
+                      type="text"
+                      value={roomForm.name}
+                      onChange={(e) =>
+                        setRoomForm((prev) => ({
+                          ...prev,
+                          name: e.target.value,
+                        }))
+                      }
+                      placeholder="例如：晨光雙人房 201"
+                    />
+                  </div>
+
+                  <div className="form-item">
+                    <label>價格</label>
+                    <input
+                      type="number"
+                      min="0"
+                      value={roomForm.price}
+                      onChange={(e) =>
+                        setRoomForm((prev) => ({
+                          ...prev,
+                          price: e.target.value,
+                        }))
+                      }
+                      placeholder="請輸入價格"
+                    />
+                  </div>
+
+                  <div className="form-item">
+                    <label>可入住人數</label>
+                    <input
+                      type="number"
+                      min="1"
+                      value={roomForm.capacity}
+                      onChange={(e) =>
+                        setRoomForm((prev) => ({
+                          ...prev,
+                          capacity: e.target.value,
+                        }))
+                      }
+                      placeholder="請輸入可住人數"
+                    />
+                  </div>
+
+                  <div className="form-item">
+                    <label>房間狀態</label>
+                    <select
+                      value={roomForm.status}
+                      onChange={(e) =>
+                        setRoomForm((prev) => ({
+                          ...prev,
+                          status: e.target.value,
+                        }))
+                      }
+                    >
+                      {Object.values(ROOM_STATUS).map((status) => (
+                        <option key={status} value={status}>
+                          {status}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="form-item form-item-full">
+                    <label>房間描述</label>
+                    <textarea
+                      rows="3"
+                      value={roomForm.description}
+                      onChange={(e) =>
+                        setRoomForm((prev) => ({
+                          ...prev,
+                          description: e.target.value,
+                        }))
+                      }
+                      placeholder="請輸入房間描述"
+                    />
+                  </div>
+
+                  <div className="form-item form-item-full">
+                    <label>設施（請用逗號分隔）</label>
+                    <input
+                      type="text"
+                      value={roomForm.amenities}
+                      onChange={(e) =>
+                        setRoomForm((prev) => ({
+                          ...prev,
+                          amenities: e.target.value,
+                        }))
+                      }
+                      placeholder="例如：Wi-Fi, 冷氣, 電視, 早餐"
+                    />
+                  </div>
+                </div>
+
+                <div className="inline-actions">
+                  <button type="submit" className="primary-btn">
+                    {editingRoomId ? "更新房間" : "新增房間"}
+                  </button>
+                  {editingRoomId && (
+                    <button
+                      type="button"
+                      className="secondary-btn"
+                      onClick={() => {
+                        setEditingRoomId("");
+                        setRoomForm(initialRoomForm);
+                      }}
+                    >
+                      取消編輯
+                    </button>
+                  )}
+                </div>
+              </form>
+            </section>
+
+            <section className="panel">
+              <div className="panel-header">
+                <h2>房間管理</h2>
+                <span className="counter-badge">共 {rooms.length} 間</span>
+              </div>
+
+              <div className="card-grid">
+                {rooms.length === 0 ? (
+                  <div className="empty-state">
+                    <p>尚未建立房間資料。</p>
+                  </div>
+                ) : (
+                  rooms.map((room) => (
+                    <div className="room-card" key={room.id}>
+                      <div className="card-top">
+                        <div>
+                          <div className="type-badge">{getRoomTypeName(room.typeId)}</div>
+                          <h3>{room.name}</h3>
+                        </div>
+                        <span
+                          className={`status-pill ${
+                            room.status === ROOM_STATUS.AVAILABLE
+                              ? "status-available"
+                              : room.status === ROOM_STATUS.BOOKED
+                              ? "status-booked"
+                              : "status-disabled"
+                          }`}
+                        >
+                          {room.status}
+                        </span>
+                      </div>
+
+                      <div className="room-meta-list">
+                        <div>價格：NT$ {room.price}</div>
+                        <div>人數：{room.capacity} 人</div>
+                      </div>
+
+                      <p className="room-desc">{room.description || "尚未填寫描述"}</p>
+
+                      <div className="select-block">
+                        <label>修改房間狀態</label>
+                        <select
+                          value={room.status}
+                          onChange={(e) => handleUpdateRoomStatus(room.id, e.target.value)}
+                        >
+                          {Object.values(ROOM_STATUS).map((status) => (
+                            <option key={status} value={status}>
+                              {status}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="inline-actions">
+                        <button className="secondary-btn" onClick={() => handleEditRoom(room)}>
+                          編輯
+                        </button>
+                        <button className="danger-btn" onClick={() => handleDeleteRoom(room.id)}>
+                          刪除
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </section>
+
+            <section className="panel">
+              <div className="panel-header">
+                <h2>所有訂單</h2>
+                <span className="counter-badge">共 {bookings.length} 筆</span>
+              </div>
+
+              <div className="card-grid">
+                {bookings.length === 0 ? (
+                  <div className="empty-state">
+                    <p>目前沒有訂單資料。</p>
+                  </div>
+                ) : (
+                  [...bookings]
+                    .sort((a, b) => {
+                      const aTime = new Date(a.checkInDate || 0).getTime();
+                      const bTime = new Date(b.checkInDate || 0).getTime();
+                      return aTime - bTime;
+                    })
+                    .map((booking) => (
+                      <div className="order-card" key={booking.id}>
+                        <div className="card-top">
+                          <div>
+                            <div className="type-badge">
+                              {booking.roomTypeName || "房型"}
+                            </div>
+                            <h3>{booking.roomName}</h3>
+                          </div>
+                          <span
+                            className={`status-pill ${
+                              booking.status === BOOKING_STATUS.CANCELED
+                                ? "status-disabled"
+                                : booking.status === BOOKING_STATUS.CHECKED_IN
+                                ? "status-booked"
+                                : "status-available"
+                            }`}
+                          >
+                            {booking.status}
+                          </span>
+                        </div>
+
+                        <div className="detail-row">
+                          <span>顧客姓名</span>
+                          <strong>{booking.customerName}</strong>
+                        </div>
+                        <div className="detail-row">
+                          <span>電話</span>
+                          <strong>{booking.phone}</strong>
+                        </div>
+                        <div className="detail-row">
+                          <span>入住日期</span>
+                          <strong>{booking.checkInDate}</strong>
+                        </div>
+                        <div className="detail-row">
+                          <span>退房日期</span>
+                          <strong>{booking.checkOutDate}</strong>
+                        </div>
+                        <div className="detail-row">
+                          <span>入住人數</span>
+                          <strong>{booking.guests} 人</strong>
+                        </div>
+                        <div className="detail-row">
+                          <span>使用者 UID</span>
+                          <strong>{booking.userId}</strong>
+                        </div>
+
+                        <div className="select-block">
+                          <label>修改訂單狀態</label>
+                          <select
+                            value={booking.status}
+                            onChange={(e) =>
+                              handleUpdateBookingStatus(booking.id, e.target.value)
+                            }
+                          >
+                            {Object.values(BOOKING_STATUS).map((status) => (
+                              <option key={status} value={status}>
+                                {status}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+                    ))
+                )}
+              </div>
+            </section>
+          </main>
+        )}
       </div>
-    </div>
+    </>
   );
 }
 
-// --- 房源編輯 Modal ---
-function RoomEditor({ room, onClose, appId }) {
-  const [formData, setFormData] = useState({
-    name: room.name || '',
-    type: room.type || '雙人房',
-    price: room.price || 1200,
-    capacity: room.capacity || 2,
-    desc: room.desc || '',
-    amenities: room.amenities || '',
-    status: room.status || '可訂房'
-  });
+const globalStyles = `
+  * {
+    box-sizing: border-box;
+  }
 
-  const handleSave = async (e) => {
-    e.preventDefault();
-    const data = { 
-      ...formData, 
-      price: Number(formData.price), 
-      capacity: Number(formData.capacity),
-      updatedAt: serverTimestamp()
-    };
-    
-    try {
-      if (room.id) {
-        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'rooms', room.id), data);
-      } else {
-        await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'rooms'), {
-          ...data,
-          createdAt: serverTimestamp()
-        });
-      }
-      onClose();
-    } catch (err) {
-      console.error(err);
-      alert('儲存失敗，請檢查權限');
+  html, body, #root {
+    margin: 0;
+    padding: 0;
+    min-height: 100%;
+    font-family: "Segoe UI", "Noto Sans TC", Arial, sans-serif;
+    background: #f4f7fb;
+    color: #1f2937;
+  }
+
+  body {
+    min-height: 100vh;
+  }
+
+  button, input, select, textarea {
+    font: inherit;
+  }
+
+  .app-shell {
+    min-height: 100vh;
+    padding: 24px;
+    background:
+      radial-gradient(circle at top left, rgba(59, 130, 246, 0.08), transparent 30%),
+      radial-gradient(circle at top right, rgba(16, 185, 129, 0.08), transparent 25%),
+      #f4f7fb;
+  }
+
+  .topbar {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    align-items: flex-start;
+    margin-bottom: 20px;
+    padding: 20px;
+    border-radius: 24px;
+    background: rgba(255, 255, 255, 0.85);
+    backdrop-filter: blur(8px);
+    box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08);
+  }
+
+  .brand-title {
+    margin: 0;
+    font-size: 32px;
+    font-weight: 800;
+    letter-spacing: 0.5px;
+  }
+
+  .brand-subtitle {
+    margin: 8px 0 0;
+    color: #6b7280;
+    font-size: 14px;
+  }
+
+  .topbar-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 12px;
+    align-items: center;
+  }
+
+  .user-chip {
+    background: #eef2ff;
+    color: #3730a3;
+    border-radius: 999px;
+    padding: 10px 14px;
+    font-size: 13px;
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+
+  .uid-text {
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .toggle-group {
+    display: flex;
+    gap: 8px;
+    background: #e5e7eb;
+    padding: 6px;
+    border-radius: 999px;
+  }
+
+  .tab-btn {
+    border: none;
+    border-radius: 999px;
+    background: transparent;
+    color: #374151;
+    padding: 10px 16px;
+    cursor: pointer;
+    transition: 0.2s ease;
+    font-weight: 600;
+  }
+
+  .tab-btn.active {
+    background: #111827;
+    color: white;
+  }
+
+  .message-banner {
+    margin-bottom: 16px;
+    background: #ecfeff;
+    color: #155e75;
+    border: 1px solid #a5f3fc;
+    padding: 14px 16px;
+    border-radius: 16px;
+    box-shadow: 0 8px 24px rgba(8, 145, 178, 0.08);
+  }
+
+  .main-grid {
+    display: grid;
+    gap: 20px;
+  }
+
+  .panel {
+    background: rgba(255, 255, 255, 0.9);
+    border-radius: 24px;
+    padding: 20px;
+    box-shadow: 0 12px 30px rgba(15, 23, 42, 0.06);
+    border: 1px solid rgba(226, 232, 240, 0.9);
+  }
+
+  .panel-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: center;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+  }
+
+  .panel-header h2 {
+    margin: 0;
+    font-size: 22px;
+  }
+
+  .counter-badge {
+    background: #f3f4f6;
+    padding: 8px 12px;
+    border-radius: 999px;
+    color: #374151;
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  .hint-text {
+    color: #6b7280;
+    font-size: 14px;
+    line-height: 1.7;
+  }
+
+  .form-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 14px;
+  }
+
+  .form-item {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .form-item-full {
+    grid-column: 1 / -1;
+  }
+
+  .form-item label {
+    font-size: 14px;
+    font-weight: 700;
+    color: #374151;
+  }
+
+  .form-item input,
+  .form-item select,
+  .form-item textarea,
+  .select-block select {
+    width: 100%;
+    border: 1px solid #d1d5db;
+    background: white;
+    border-radius: 14px;
+    padding: 12px 14px;
+    outline: none;
+    transition: 0.2s ease;
+  }
+
+  .form-item input:focus,
+  .form-item select:focus,
+  .form-item textarea:focus,
+  .select-block select:focus {
+    border-color: #60a5fa;
+    box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.18);
+  }
+
+  .primary-btn,
+  .secondary-btn,
+  .danger-btn {
+    border: none;
+    border-radius: 14px;
+    padding: 12px 16px;
+    cursor: pointer;
+    font-weight: 700;
+    transition: transform 0.16s ease, opacity 0.16s ease;
+  }
+
+  .primary-btn:hover,
+  .secondary-btn:hover,
+  .danger-btn:hover {
+    transform: translateY(-1px);
+  }
+
+  .primary-btn {
+    background: linear-gradient(135deg, #2563eb, #1d4ed8);
+    color: white;
+  }
+
+  .secondary-btn {
+    background: #eef2f7;
+    color: #1f2937;
+  }
+
+  .danger-btn {
+    background: #ef4444;
+    color: white;
+  }
+
+  .inline-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+  }
+
+  .checkbox-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: #374151;
+    font-size: 14px;
+  }
+
+  .card-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 16px;
+  }
+
+  .room-card,
+  .order-card,
+  .detail-card,
+  .simple-list-item {
+    background: white;
+    border-radius: 20px;
+    padding: 18px;
+    border: 1px solid #e5e7eb;
+    box-shadow: 0 8px 20px rgba(15, 23, 42, 0.04);
+  }
+
+  .card-top {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: flex-start;
+    margin-bottom: 14px;
+  }
+
+  .card-top h3 {
+    margin: 8px 0 0;
+    font-size: 20px;
+  }
+
+  .type-badge {
+    display: inline-block;
+    background: #eff6ff;
+    color: #1d4ed8;
+    border-radius: 999px;
+    padding: 6px 10px;
+    font-size: 12px;
+    font-weight: 700;
+  }
+
+  .status-pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 8px 12px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 800;
+    white-space: nowrap;
+  }
+
+  .status-available {
+    background: #dcfce7;
+    color: #166534;
+  }
+
+  .status-booked {
+    background: #dbeafe;
+    color: #1d4ed8;
+  }
+
+  .status-disabled {
+    background: #fee2e2;
+    color: #b91c1c;
+  }
+
+  .room-meta-list {
+    display: grid;
+    gap: 8px;
+    margin-bottom: 12px;
+    color: #374151;
+    font-size: 14px;
+  }
+
+  .room-desc {
+    color: #6b7280;
+    min-height: 48px;
+    line-height: 1.7;
+  }
+
+  .detail-layout {
+    display: grid;
+    grid-template-columns: 1fr 1.1fr;
+    gap: 18px;
+  }
+
+  .detail-card h3 {
+    margin-top: 0;
+    margin-bottom: 16px;
+    font-size: 22px;
+  }
+
+  .detail-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: flex-start;
+    padding: 10px 0;
+    border-bottom: 1px dashed #e5e7eb;
+  }
+
+  .detail-row span {
+    color: #6b7280;
+    min-width: 90px;
+  }
+
+  .detail-row strong {
+    text-align: right;
+    word-break: break-word;
+  }
+
+  .empty-state {
+    border: 1px dashed #cbd5e1;
+    border-radius: 18px;
+    padding: 28px;
+    text-align: center;
+    color: #6b7280;
+    background: #f8fafc;
+  }
+
+  .simple-list {
+    display: grid;
+    gap: 12px;
+    margin-top: 16px;
+  }
+
+  .simple-list-item {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: center;
+  }
+
+  .simple-list-item p {
+    margin: 6px 0 0;
+    color: #6b7280;
+  }
+
+  .select-block {
+    display: grid;
+    gap: 8px;
+    margin: 14px 0;
+  }
+
+  .select-block label {
+    font-size: 14px;
+    font-weight: 700;
+    color: #374151;
+  }
+
+  .fullscreen-loading {
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    background:
+      radial-gradient(circle at top left, rgba(59, 130, 246, 0.08), transparent 30%),
+      radial-gradient(circle at top right, rgba(16, 185, 129, 0.08), transparent 25%),
+      #f4f7fb;
+  }
+
+  .loading-card {
+    width: min(420px, 100%);
+    background: rgba(255, 255, 255, 0.92);
+    border-radius: 28px;
+    padding: 36px 24px;
+    text-align: center;
+    box-shadow: 0 16px 40px rgba(15, 23, 42, 0.08);
+  }
+
+  .loading-card h2 {
+    margin: 12px 0 8px;
+    font-size: 28px;
+  }
+
+  .loading-card p {
+    margin: 0;
+    color: #6b7280;
+  }
+
+  .spinner {
+    width: 52px;
+    height: 52px;
+    margin: 0 auto 8px;
+    border-radius: 999px;
+    border: 5px solid #dbeafe;
+    border-top-color: #2563eb;
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
     }
-  };
+  }
 
-  return (
-    <div className="fixed inset-0 bg-gray-900/60 backdrop-blur-md z-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-[2rem] w-full max-w-lg p-8 overflow-y-auto max-h-[90vh] shadow-2xl">
-        <h2 className="text-2xl font-black mb-8 text-gray-800">{room.id ? '房源編輯' : '配置新房源'}</h2>
-        <form onSubmit={handleSave} className="space-y-6">
-          <div className="grid grid-cols-2 gap-4">
-            <div className="col-span-2">
-              <label className="block text-[10px] font-black text-gray-400 mb-2 uppercase tracking-widest">房源顯示名稱</label>
-              <input required value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className="w-full p-3 bg-gray-50 border-none rounded-xl outline-none focus:ring-2 focus:ring-blue-500/20" />
-            </div>
-            <div>
-              <label className="block text-[10px] font-black text-gray-400 mb-2 uppercase tracking-widest">房型類別</label>
-              <input required value={formData.type} onChange={e => setFormData({...formData, type: e.target.value})} className="w-full p-3 bg-gray-50 border-none rounded-xl outline-none focus:ring-2 focus:ring-blue-500/20" />
-            </div>
-            <div>
-              <label className="block text-[10px] font-black text-gray-400 mb-2 uppercase tracking-widest">基礎房價</label>
-              <input required type="number" value={formData.price} onChange={e => setFormData({...formData, price: e.target.value})} className="w-full p-3 bg-gray-50 border-none rounded-xl outline-none focus:ring-2 focus:ring-blue-500/20" />
-            </div>
-            <div>
-              <label className="block text-[10px] font-black text-gray-400 mb-2 uppercase tracking-widest">入住容量</label>
-              <input required type="number" value={formData.capacity} onChange={e => setFormData({...formData, capacity: e.target.value})} className="w-full p-3 bg-gray-50 border-none rounded-xl outline-none focus:ring-2 focus:ring-blue-500/20" />
-            </div>
-            <div>
-              <label className="block text-[10px] font-black text-gray-400 mb-2 uppercase tracking-widest">營運狀態</label>
-              <select value={formData.status} onChange={e => setFormData({...formData, status: e.target.value})} className="w-full p-3 bg-gray-50 border-none rounded-xl outline-none focus:ring-2 focus:ring-blue-500/20">
-                <option value="可訂房">可訂房</option>
-                <option value="停用">停用/維護中</option>
-              </select>
-            </div>
-          </div>
-          <div>
-            <label className="block text-[10px] font-black text-gray-400 mb-2 uppercase tracking-widest">詳細描述</label>
-            <textarea rows="3" value={formData.desc} onChange={e => setFormData({...formData, desc: e.target.value})} className="w-full p-3 bg-gray-50 border-none rounded-xl outline-none focus:ring-2 focus:ring-blue-500/20 resize-none"></textarea>
-          </div>
-          <div>
-            <label className="block text-[10px] font-black text-gray-400 mb-2 uppercase tracking-widest">設施備註 (逗號分隔)</label>
-            <input value={formData.amenities} onChange={e => setFormData({...formData, amenities: e.target.value})} className="w-full p-3 bg-gray-50 border-none rounded-xl outline-none focus:ring-2 focus:ring-blue-500/20" placeholder="景觀、按摩浴缸、投影幕..." />
-          </div>
-          <div className="flex gap-4 pt-6">
-            <button type="button" onClick={onClose} className="flex-1 py-4 bg-gray-50 text-gray-500 rounded-2xl font-black transition-all">取消</button>
-            <button type="submit" className="flex-1 py-4 bg-blue-600 text-white rounded-2xl font-black shadow-xl shadow-blue-100 transition-all hover:bg-blue-700 active:scale-95">儲存配置</button>
-          </div>
-        </form>
-      </div>
-    </div>
-  );
-}
+  @media (max-width: 1080px) {
+    .card-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .detail-layout {
+      grid-template-columns: 1fr;
+    }
+
+    .form-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  @media (max-width: 768px) {
+    .app-shell {
+      padding: 14px;
+    }
+
+    .topbar {
+      flex-direction: column;
+      align-items: stretch;
+    }
+
+    .topbar-actions {
+      justify-content: flex-start;
+    }
+
+    .card-grid,
+    .form-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .simple-list-item {
+      flex-direction: column;
+      align-items: stretch;
+    }
+
+    .detail-row {
+      flex-direction: column;
+    }
+
+    .detail-row strong {
+      text-align: left;
+    }
+
+    .brand-title {
+      font-size: 26px;
+    }
+  }
+`;
