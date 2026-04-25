@@ -16,12 +16,10 @@ import {
   getDocs,
   query,
   where,
-  orderBy,
   serverTimestamp,
   onSnapshot,
 } from "firebase/firestore";
 
-/* ================= Firebase 設定 ================= */
 const firebaseConfig = {
   apiKey: "AIzaSyCdaGbqhxBjkO43elRRtu8G7UWARU9xHmM",
   authDomain: "my-rental-app-59210.firebaseapp.com",
@@ -36,7 +34,6 @@ const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
 
-/* ================= 常數 ================= */
 const ROOM_STATUS = ["可訂房", "已被預訂", "停用"];
 const ORDER_STATUS = ["待確認", "已確認", "已取消", "已入住"];
 const ACTIVE_ORDER_STATUS = ["待確認", "已確認", "已入住"];
@@ -51,17 +48,14 @@ export default function App() {
   const [rooms, setRooms] = useState([]);
   const [orders, setOrders] = useState([]);
 
-  const [page, setPage] = useState("rooms");
+  const [page, setPage] = useState("adminRooms");
   const [message, setMessage] = useState(null);
+  const [selectedRoom, setSelectedRoom] = useState(null);
 
   const [filters, setFilters] = useState({
-    checkInDate: "",
-    checkOutDate: "",
     roomTypeId: "",
     maxPrice: "",
   });
-
-  const [selectedRoom, setSelectedRoom] = useState(null);
 
   const [bookingForm, setBookingForm] = useState({
     customerName: "",
@@ -94,12 +88,12 @@ export default function App() {
   const isLoading = !authReady || (role && !dataReady);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+    const unsub = onAuthStateChanged(auth, (currentUser) => {
       setUser(currentUser);
       setAuthReady(true);
     });
 
-    return () => unsubscribe();
+    return () => unsub();
   }, []);
 
   useEffect(() => {
@@ -111,28 +105,49 @@ export default function App() {
     setDataReady(false);
 
     const unsubTypes = onSnapshot(
-      query(collection(db, "roomTypes"), orderBy("createdAt", "desc")),
+      collection(db, "roomTypes"),
       (snapshot) => {
-        setRoomTypes(snapshot.docs.map((d) => ({ id: d.id, ...d.data() })));
+        const list = snapshot.docs.map((d) => ({
+          id: d.id,
+          ...d.data(),
+        }));
+        setRoomTypes(list);
         setDataReady(true);
       },
-      () => {
-        showMessage("讀取房型失敗，請確認 Firestore Rules。", "error");
+      (error) => {
+        console.error(error);
+        showMessage("讀取房型失敗，請檢查 Firestore Rules", "error");
         setDataReady(true);
       }
     );
 
     const unsubRooms = onSnapshot(
-      query(collection(db, "rooms"), orderBy("createdAt", "desc")),
+      collection(db, "rooms"),
       (snapshot) => {
-        setRooms(snapshot.docs.map((d) => ({ id: d.id, ...d.data() })));
+        const list = snapshot.docs.map((d) => ({
+          id: d.id,
+          ...d.data(),
+        }));
+        setRooms(list);
+      },
+      (error) => {
+        console.error(error);
+        showMessage("讀取房間失敗", "error");
       }
     );
 
     const unsubOrders = onSnapshot(
-      query(collection(db, "orders"), orderBy("createdAt", "desc")),
+      collection(db, "orders"),
       (snapshot) => {
-        setOrders(snapshot.docs.map((d) => ({ id: d.id, ...d.data() })));
+        const list = snapshot.docs.map((d) => ({
+          id: d.id,
+          ...d.data(),
+        }));
+        setOrders(list);
+      },
+      (error) => {
+        console.error(error);
+        showMessage("讀取訂單失敗", "error");
       }
     );
 
@@ -167,38 +182,13 @@ export default function App() {
     localStorage.removeItem("role");
     localStorage.removeItem("uid");
     localStorage.removeItem("isLogin");
-    setRole("");
     setUser(null);
-    setPage("rooms");
+    setRole("");
     showMessage("已登出");
   };
 
   const getRoomTypeName = (roomTypeId) => {
-    return roomTypes.find((t) => t.id === roomTypeId)?.name || "未分類房型";
-  };
-
-  const isDateOverlap = (newIn, newOut, oldIn, oldOut) => {
-    return newIn < oldOut && newOut > oldIn;
-  };
-
-  const checkRoomAvailable = async (roomId, checkInDate, checkOutDate) => {
-    const q = query(
-      collection(db, "orders"),
-      where("roomId", "==", roomId),
-      where("status", "in", ACTIVE_ORDER_STATUS)
-    );
-
-    const snapshot = await getDocs(q);
-
-    return !snapshot.docs.some((d) => {
-      const order = d.data();
-      return isDateOverlap(
-        checkInDate,
-        checkOutDate,
-        order.checkInDate,
-        order.checkOutDate
-      );
-    });
+    return roomTypes.find((type) => type.id === roomTypeId)?.name || "未分類";
   };
 
   const filteredRooms = useMemo(() => {
@@ -217,118 +207,36 @@ export default function App() {
 
   const customerOrders = useMemo(() => {
     return orders.filter((order) => {
-      const uidMatch = order.customerUid === user?.uid;
-      const phoneMatch = phoneSearch && order.phone === phoneSearch;
-      return uidMatch || phoneMatch;
+      return order.customerUid === user?.uid || order.phone === phoneSearch;
     });
   }, [orders, user, phoneSearch]);
 
-  const submitBooking = async () => {
-    if (!selectedRoom) return;
-
-    if (
-      !bookingForm.customerName ||
-      !bookingForm.phone ||
-      !bookingForm.checkInDate ||
-      !bookingForm.checkOutDate ||
-      !bookingForm.guests
-    ) {
-      showMessage("請完整填寫訂房資料", "error");
-      return;
-    }
-
-    if (bookingForm.checkInDate >= bookingForm.checkOutDate) {
-      showMessage("退房日期必須晚於入住日期", "error");
-      return;
-    }
-
-    if (selectedRoom.status !== "可訂房") {
-      showMessage("此房間目前不可訂房", "error");
-      return;
-    }
-
-    if (Number(bookingForm.guests) > Number(selectedRoom.capacity)) {
-      showMessage("入住人數超過房間可入住人數", "error");
-      return;
-    }
-
-    try {
-      const available = await checkRoomAvailable(
-        selectedRoom.id,
-        bookingForm.checkInDate,
-        bookingForm.checkOutDate
-      );
-
-      if (!available) {
-        showMessage("此日期區間已有有效訂單，無法重複訂房", "error");
-        return;
-      }
-
-      await addDoc(collection(db, "orders"), {
-        roomId: selectedRoom.id,
-        roomName: selectedRoom.roomName,
-        roomTypeName: getRoomTypeName(selectedRoom.roomTypeId),
-        customerUid: user.uid,
-        customerName: bookingForm.customerName,
-        phone: bookingForm.phone,
-        checkInDate: bookingForm.checkInDate,
-        checkOutDate: bookingForm.checkOutDate,
-        guests: Number(bookingForm.guests),
-        note: bookingForm.note,
-        status: "待確認",
-        createdAt: serverTimestamp(),
-      });
-
-      await updateDoc(doc(db, "rooms", selectedRoom.id), {
-        status: "已被預訂",
-      });
-
-      setSelectedRoom(null);
-      setBookingForm({
-        customerName: "",
-        phone: "",
-        checkInDate: "",
-        checkOutDate: "",
-        guests: 1,
-        note: "",
-      });
-
-      showMessage("訂房申請已送出");
-    } catch (error) {
-      showMessage("訂房失敗：" + error.message, "error");
-    }
+  const isDateOverlap = (newIn, newOut, oldIn, oldOut) => {
+    return newIn < oldOut && newOut > oldIn;
   };
 
-  const cancelOrder = async (order) => {
-    const today = new Date().toISOString().slice(0, 10);
+  const checkRoomAvailable = async (roomId, checkInDate, checkOutDate) => {
+    const q = query(
+      collection(db, "orders"),
+      where("roomId", "==", roomId),
+      where("status", "in", ACTIVE_ORDER_STATUS)
+    );
 
-    if (order.status === "已入住") {
-      showMessage("已入住訂單不可取消", "error");
-      return;
-    }
+    const snapshot = await getDocs(q);
 
-    if (order.checkInDate <= today) {
-      showMessage("尚未入住的訂單才可取消", "error");
-      return;
-    }
-
-    try {
-      await updateDoc(doc(db, "orders", order.id), {
-        status: "已取消",
-      });
-
-      await updateDoc(doc(db, "rooms", order.roomId), {
-        status: "可訂房",
-      });
-
-      showMessage("訂單已取消");
-    } catch (error) {
-      showMessage("取消失敗：" + error.message, "error");
-    }
+    return !snapshot.docs.some((d) => {
+      const oldOrder = d.data();
+      return isDateOverlap(
+        checkInDate,
+        checkOutDate,
+        oldOrder.checkInDate,
+        oldOrder.checkOutDate
+      );
+    });
   };
 
   const saveRoomType = async () => {
-    if (!roomTypeForm.name) {
+    if (!roomTypeForm.name.trim()) {
       showMessage("請輸入房型名稱", "error");
       return;
     }
@@ -349,39 +257,55 @@ export default function App() {
         showMessage("房型已新增");
       }
 
-      setRoomTypeForm({ id: "", name: "", description: "" });
+      setRoomTypeForm({
+        id: "",
+        name: "",
+        description: "",
+      });
     } catch (error) {
-      showMessage("儲存房型失敗：" + error.message, "error");
+      showMessage("房型儲存失敗：" + error.message, "error");
     }
   };
 
   const editRoomType = (type) => {
     setRoomTypeForm({
       id: type.id,
-      name: type.name,
-      description: type.description,
+      name: type.name || "",
+      description: type.description || "",
     });
   };
 
-  const removeRoomType = async (id) => {
+  const deleteRoomType = async (id) => {
     if (!window.confirm("確定刪除此房型？")) return;
 
     try {
       await deleteDoc(doc(db, "roomTypes", id));
       showMessage("房型已刪除");
     } catch (error) {
-      showMessage("刪除房型失敗：" + error.message, "error");
+      showMessage("刪除失敗：" + error.message, "error");
     }
   };
 
   const saveRoom = async () => {
-    if (
-      !roomForm.roomTypeId ||
-      !roomForm.roomName ||
-      !roomForm.price ||
-      !roomForm.capacity
-    ) {
-      showMessage("請完整填寫房間資料", "error");
+    console.log("roomForm =", roomForm);
+
+    if (!roomForm.roomTypeId) {
+      showMessage("請選擇房型", "error");
+      return;
+    }
+
+    if (!roomForm.roomName.trim()) {
+      showMessage("請輸入房間名稱或編號", "error");
+      return;
+    }
+
+    if (!roomForm.price || Number(roomForm.price) <= 0) {
+      showMessage("請輸入正確價格", "error");
+      return;
+    }
+
+    if (!roomForm.capacity || Number(roomForm.capacity) <= 0) {
+      showMessage("請輸入正確可入住人數", "error");
       return;
     }
 
@@ -418,31 +342,144 @@ export default function App() {
         status: "可訂房",
       });
     } catch (error) {
-      showMessage("儲存房間失敗：" + error.message, "error");
+      showMessage("房間儲存失敗：" + error.message, "error");
     }
   };
 
   const editRoom = (room) => {
     setRoomForm({
       id: room.id,
-      roomTypeId: room.roomTypeId,
-      roomName: room.roomName,
-      description: room.description,
-      price: room.price,
-      capacity: room.capacity,
-      facilities: room.facilities,
-      status: room.status,
+      roomTypeId: room.roomTypeId || "",
+      roomName: room.roomName || "",
+      description: room.description || "",
+      price: room.price || "",
+      capacity: room.capacity || "",
+      facilities: room.facilities || "",
+      status: room.status || "可訂房",
     });
   };
 
-  const removeRoom = async (id) => {
+  const deleteRoom = async (id) => {
     if (!window.confirm("確定刪除此房間？")) return;
 
     try {
       await deleteDoc(doc(db, "rooms", id));
       showMessage("房間已刪除");
     } catch (error) {
-      showMessage("刪除房間失敗：" + error.message, "error");
+      showMessage("刪除失敗：" + error.message, "error");
+    }
+  };
+
+  const updateRoomStatus = async (roomId, status) => {
+    try {
+      await updateDoc(doc(db, "rooms", roomId), { status });
+      showMessage("房間狀態已更新");
+    } catch (error) {
+      showMessage("更新失敗：" + error.message, "error");
+    }
+  };
+
+  const submitBooking = async () => {
+    if (!selectedRoom) return;
+
+    if (
+      !bookingForm.customerName ||
+      !bookingForm.phone ||
+      !bookingForm.checkInDate ||
+      !bookingForm.checkOutDate ||
+      !bookingForm.guests
+    ) {
+      showMessage("請完整填寫訂房資料", "error");
+      return;
+    }
+
+    if (bookingForm.checkInDate >= bookingForm.checkOutDate) {
+      showMessage("退房日期必須晚於入住日期", "error");
+      return;
+    }
+
+    if (selectedRoom.status !== "可訂房") {
+      showMessage("此房間目前不可訂房", "error");
+      return;
+    }
+
+    if (Number(bookingForm.guests) > Number(selectedRoom.capacity)) {
+      showMessage("入住人數超過房間限制", "error");
+      return;
+    }
+
+    try {
+      const available = await checkRoomAvailable(
+        selectedRoom.id,
+        bookingForm.checkInDate,
+        bookingForm.checkOutDate
+      );
+
+      if (!available) {
+        showMessage("此日期區間已有訂單，無法重複訂房", "error");
+        return;
+      }
+
+      await addDoc(collection(db, "orders"), {
+        roomId: selectedRoom.id,
+        roomName: selectedRoom.roomName,
+        roomTypeName: getRoomTypeName(selectedRoom.roomTypeId),
+        customerUid: user.uid,
+        customerName: bookingForm.customerName,
+        phone: bookingForm.phone,
+        checkInDate: bookingForm.checkInDate,
+        checkOutDate: bookingForm.checkOutDate,
+        guests: Number(bookingForm.guests),
+        note: bookingForm.note,
+        status: "待確認",
+        createdAt: serverTimestamp(),
+      });
+
+      await updateDoc(doc(db, "rooms", selectedRoom.id), {
+        status: "已被預訂",
+      });
+
+      setSelectedRoom(null);
+      setBookingForm({
+        customerName: "",
+        phone: "",
+        checkInDate: "",
+        checkOutDate: "",
+        guests: 1,
+        note: "",
+      });
+
+      showMessage("訂房成功，等待管理者確認");
+    } catch (error) {
+      showMessage("訂房失敗：" + error.message, "error");
+    }
+  };
+
+  const cancelOrder = async (order) => {
+    const today = new Date().toISOString().slice(0, 10);
+
+    if (order.status === "已入住") {
+      showMessage("已入住訂單不可取消", "error");
+      return;
+    }
+
+    if (order.checkInDate <= today) {
+      showMessage("已到入住日或已過期，無法取消", "error");
+      return;
+    }
+
+    try {
+      await updateDoc(doc(db, "orders", order.id), {
+        status: "已取消",
+      });
+
+      await updateDoc(doc(db, "rooms", order.roomId), {
+        status: "可訂房",
+      });
+
+      showMessage("訂單已取消");
+    } catch (error) {
+      showMessage("取消失敗：" + error.message, "error");
     }
   };
 
@@ -456,16 +493,13 @@ export default function App() {
         });
       }
 
-      showMessage("訂單狀態已更新");
-    } catch (error) {
-      showMessage("更新失敗：" + error.message, "error");
-    }
-  };
+      if (status === "已確認" || status === "已入住") {
+        await updateDoc(doc(db, "rooms", order.roomId), {
+          status: "已被預訂",
+        });
+      }
 
-  const updateRoomStatus = async (roomId, status) => {
-    try {
-      await updateDoc(doc(db, "rooms", roomId), { status });
-      showMessage("房間狀態已更新");
+      showMessage("訂單狀態已更新");
     } catch (error) {
       showMessage("更新失敗：" + error.message, "error");
     }
@@ -473,22 +507,24 @@ export default function App() {
 
   const initDemoData = async () => {
     try {
-      const deluxeRef = await addDoc(collection(db, "roomTypes"), {
-        name: "雙人套房",
-        description: "適合情侶或兩人旅行，空間舒適。",
+      const type1 = await addDoc(collection(db, "roomTypes"), {
+        name: "雙人房",
+        description:
+          "適合兩人入住，房內空間舒適，附有獨立衛浴、冷氣、Wi-Fi 與電視。",
         createdAt: serverTimestamp(),
       });
 
-      const familyRef = await addDoc(collection(db, "roomTypes"), {
+      const type2 = await addDoc(collection(db, "roomTypes"), {
         name: "家庭房",
-        description: "適合家庭旅遊，提供較大空間與多人入住。",
+        description:
+          "適合家庭或多人入住，空間較大，提供多張床位與基本生活設備。",
         createdAt: serverTimestamp(),
       });
 
       await addDoc(collection(db, "rooms"), {
-        roomTypeId: deluxeRef.id,
+        roomTypeId: type1.id,
         roomName: "A101",
-        description: "明亮雙人房，附獨立衛浴與窗景。",
+        description: "明亮舒適的雙人房，適合情侶或朋友住宿。",
         price: 2200,
         capacity: 2,
         facilities: "Wi-Fi、冷氣、電視、獨立衛浴",
@@ -497,28 +533,17 @@ export default function App() {
       });
 
       await addDoc(collection(db, "rooms"), {
-        roomTypeId: deluxeRef.id,
-        roomName: "A102",
-        description: "舒適雙人房，適合短期住宿。",
-        price: 2000,
-        capacity: 2,
-        facilities: "Wi-Fi、冷氣、吹風機",
-        status: "可訂房",
-        createdAt: serverTimestamp(),
-      });
-
-      await addDoc(collection(db, "rooms"), {
-        roomTypeId: familyRef.id,
+        roomTypeId: type2.id,
         roomName: "B201",
-        description: "寬敞家庭房，可入住四人。",
+        description: "寬敞家庭房，適合親子旅遊。",
         price: 3600,
         capacity: 4,
-        facilities: "Wi-Fi、冷氣、電視、冰箱、獨立衛浴",
+        facilities: "Wi-Fi、冷氣、冰箱、電視、獨立衛浴",
         status: "可訂房",
         createdAt: serverTimestamp(),
       });
 
-      showMessage("範例資料初始化完成");
+      showMessage("初始化範例資料完成");
     } catch (error) {
       showMessage("初始化失敗：" + error.message, "error");
     }
@@ -574,20 +599,6 @@ export default function App() {
               <section className="panel">
                 <h3>搜尋空房</h3>
                 <div className="grid4">
-                  <input
-                    type="date"
-                    value={filters.checkInDate}
-                    onChange={(e) =>
-                      setFilters({ ...filters, checkInDate: e.target.value })
-                    }
-                  />
-                  <input
-                    type="date"
-                    value={filters.checkOutDate}
-                    onChange={(e) =>
-                      setFilters({ ...filters, checkOutDate: e.target.value })
-                    }
-                  />
                   <select
                     value={filters.roomTypeId}
                     onChange={(e) =>
@@ -601,6 +612,7 @@ export default function App() {
                       </option>
                     ))}
                   </select>
+
                   <input
                     type="number"
                     placeholder="最高價格"
@@ -635,10 +647,11 @@ export default function App() {
             <section className="panel">
               <h3>我的訂單</h3>
               <input
-                placeholder="也可輸入電話輔助查詢"
+                placeholder="輸入電話輔助查詢"
                 value={phoneSearch}
                 onChange={(e) => setPhoneSearch(e.target.value)}
               />
+
               <div className="tableWrap">
                 <table>
                   <thead>
@@ -688,14 +701,19 @@ export default function App() {
           {page === "adminTypes" && (
             <section className="panel">
               <h3>房型管理</h3>
+
               <div className="form">
                 <input
                   placeholder="房型名稱"
                   value={roomTypeForm.name}
                   onChange={(e) =>
-                    setRoomTypeForm({ ...roomTypeForm, name: e.target.value })
+                    setRoomTypeForm({
+                      ...roomTypeForm,
+                      name: e.target.value,
+                    })
                   }
                 />
+
                 <textarea
                   placeholder="房型描述"
                   value={roomTypeForm.description}
@@ -706,6 +724,7 @@ export default function App() {
                     })
                   }
                 />
+
                 <button onClick={saveRoomType}>
                   {roomTypeForm.id ? "更新房型" : "新增房型"}
                 </button>
@@ -719,7 +738,7 @@ export default function App() {
                     <button onClick={() => editRoomType(type)}>編輯</button>
                     <button
                       className="danger"
-                      onClick={() => removeRoomType(type.id)}
+                      onClick={() => deleteRoomType(type.id)}
                     >
                       刪除
                     </button>
@@ -732,67 +751,102 @@ export default function App() {
           {page === "adminRooms" && (
             <section className="panel">
               <h3>房間管理</h3>
+
+              <div className="notice">
+                目前讀取到 {roomTypes.length} 筆房型資料
+              </div>
+
               <div className="form">
                 <select
                   value={roomForm.roomTypeId}
                   onChange={(e) =>
-                    setRoomForm({ ...roomForm, roomTypeId: e.target.value })
+                    setRoomForm({
+                      ...roomForm,
+                      roomTypeId: e.target.value,
+                    })
                   }
                 >
-                  <option value="">選擇房型</option>
+                  <option value="">請選擇房型</option>
                   {roomTypes.map((type) => (
                     <option key={type.id} value={type.id}>
                       {type.name}
                     </option>
                   ))}
                 </select>
+
                 <input
-                  placeholder="房間名稱或編號"
+                  placeholder="房間名稱或編號，例如 A101"
                   value={roomForm.roomName}
                   onChange={(e) =>
-                    setRoomForm({ ...roomForm, roomName: e.target.value })
+                    setRoomForm({
+                      ...roomForm,
+                      roomName: e.target.value,
+                    })
                   }
                 />
+
                 <textarea
                   placeholder="房間描述"
                   value={roomForm.description}
                   onChange={(e) =>
-                    setRoomForm({ ...roomForm, description: e.target.value })
+                    setRoomForm({
+                      ...roomForm,
+                      description: e.target.value,
+                    })
                   }
                 />
+
                 <input
                   type="number"
-                  placeholder="價格"
+                  placeholder="價格，例如 2200"
                   value={roomForm.price}
                   onChange={(e) =>
-                    setRoomForm({ ...roomForm, price: e.target.value })
+                    setRoomForm({
+                      ...roomForm,
+                      price: e.target.value,
+                    })
                   }
                 />
+
                 <input
                   type="number"
-                  placeholder="可入住人數"
+                  placeholder="可入住人數，例如 2"
                   value={roomForm.capacity}
                   onChange={(e) =>
-                    setRoomForm({ ...roomForm, capacity: e.target.value })
+                    setRoomForm({
+                      ...roomForm,
+                      capacity: e.target.value,
+                    })
                   }
                 />
+
                 <input
-                  placeholder="設施，例如 Wi-Fi、冷氣"
+                  placeholder="設施，例如 Wi-Fi、冷氣、電視"
                   value={roomForm.facilities}
                   onChange={(e) =>
-                    setRoomForm({ ...roomForm, facilities: e.target.value })
+                    setRoomForm({
+                      ...roomForm,
+                      facilities: e.target.value,
+                    })
                   }
                 />
+
                 <select
                   value={roomForm.status}
                   onChange={(e) =>
-                    setRoomForm({ ...roomForm, status: e.target.value })
+                    setRoomForm({
+                      ...roomForm,
+                      status: e.target.value,
+                    })
                   }
                 >
-                  {ROOM_STATUS.map((s) => (
-                    <option key={s}>{s}</option>
+                  {ROOM_STATUS.map((status) => (
+                    <option key={status} value={status}>
+                      {status}
+                    </option>
                   ))}
                 </select>
+
                 <button onClick={saveRoom}>
                   {roomForm.id ? "更新房間" : "新增房間"}
                 </button>
@@ -808,21 +862,26 @@ export default function App() {
                     <p>房型：{getRoomTypeName(room.roomTypeId)}</p>
                     <p>價格：NT$ {room.price}</p>
                     <p>可入住：{room.capacity} 人</p>
-                    <p>{room.description}</p>
+                    <p>描述：{room.description}</p>
+                    <p>設施：{room.facilities}</p>
+
                     <select
                       value={room.status}
                       onChange={(e) =>
                         updateRoomStatus(room.id, e.target.value)
                       }
                     >
-                      {ROOM_STATUS.map((s) => (
-                        <option key={s}>{s}</option>
+                      {ROOM_STATUS.map((status) => (
+                        <option key={status} value={status}>
+                          {status}
+                        </option>
                       ))}
                     </select>
+
                     <button onClick={() => editRoom(room)}>編輯</button>
                     <button
                       className="danger"
-                      onClick={() => removeRoom(room.id)}
+                      onClick={() => deleteRoom(room.id)}
                     >
                       刪除
                     </button>
@@ -834,7 +893,8 @@ export default function App() {
 
           {page === "adminOrders" && (
             <section className="panel">
-              <h3>所有訂單</h3>
+              <h3>訂單管理</h3>
+
               <div className="tableWrap">
                 <table>
                   <thead>
@@ -866,8 +926,10 @@ export default function App() {
                               updateOrderStatus(order, e.target.value)
                             }
                           >
-                            {ORDER_STATUS.map((s) => (
-                              <option key={s}>{s}</option>
+                            {ORDER_STATUS.map((status) => (
+                              <option key={status} value={status}>
+                                {status}
+                              </option>
                             ))}
                           </select>
                         </td>
@@ -897,6 +959,7 @@ export default function App() {
             <p>狀態：{selectedRoom.status}</p>
 
             <h3>訂房申請</h3>
+
             <div className="form">
               <input
                 placeholder="訂房人姓名"
@@ -908,13 +971,18 @@ export default function App() {
                   })
                 }
               />
+
               <input
                 placeholder="電話"
                 value={bookingForm.phone}
                 onChange={(e) =>
-                  setBookingForm({ ...bookingForm, phone: e.target.value })
+                  setBookingForm({
+                    ...bookingForm,
+                    phone: e.target.value,
+                  })
                 }
               />
+
               <input
                 type="date"
                 value={bookingForm.checkInDate}
@@ -925,6 +993,7 @@ export default function App() {
                   })
                 }
               />
+
               <input
                 type="date"
                 value={bookingForm.checkOutDate}
@@ -935,22 +1004,31 @@ export default function App() {
                   })
                 }
               />
+
               <input
                 type="number"
                 min="1"
                 placeholder="入住人數"
                 value={bookingForm.guests}
                 onChange={(e) =>
-                  setBookingForm({ ...bookingForm, guests: e.target.value })
+                  setBookingForm({
+                    ...bookingForm,
+                    guests: e.target.value,
+                  })
                 }
               />
+
               <textarea
                 placeholder="備註"
                 value={bookingForm.note}
                 onChange={(e) =>
-                  setBookingForm({ ...bookingForm, note: e.target.value })
+                  setBookingForm({
+                    ...bookingForm,
+                    note: e.target.value,
+                  })
                 }
               />
+
               <button onClick={submitBooking}>送出訂房</button>
             </div>
           </div>
@@ -1014,8 +1092,8 @@ function Style() {
         display: flex;
         justify-content: center;
         align-items: center;
-        background: linear-gradient(135deg, #dbeafe, #f8fafc);
         padding: 20px;
+        background: linear-gradient(135deg, #dbeafe, #f8fafc);
       }
 
       .loginCard {
@@ -1024,12 +1102,8 @@ function Style() {
         background: white;
         border-radius: 24px;
         padding: 36px;
-        box-shadow: 0 20px 50px rgba(0,0,0,0.12);
         text-align: center;
-      }
-
-      .loginCard h1 {
-        margin-bottom: 10px;
+        box-shadow: 0 20px 50px rgba(0,0,0,0.12);
       }
 
       .adminBtn {
@@ -1086,8 +1160,14 @@ function Style() {
 
       .grid4 {
         display: grid;
-        grid-template-columns: repeat(4, 1fr);
+        grid-template-columns: repeat(2, 1fr);
         gap: 12px;
+      }
+
+      .form {
+        display: grid;
+        gap: 12px;
+        margin-bottom: 20px;
       }
 
       .cards {
@@ -1101,11 +1181,6 @@ function Style() {
         border-radius: 22px;
         padding: 20px;
         box-shadow: 0 10px 30px rgba(0,0,0,0.06);
-        position: relative;
-      }
-
-      .card h3 {
-        margin-top: 8px;
       }
 
       .card p {
@@ -1134,10 +1209,13 @@ function Style() {
         background: #6b7280;
       }
 
-      .form {
-        display: grid;
-        gap: 12px;
-        margin-bottom: 20px;
+      .notice {
+        background: #eff6ff;
+        color: #1d4ed8;
+        padding: 12px;
+        border-radius: 12px;
+        margin-bottom: 14px;
+        font-weight: 600;
       }
 
       .tableWrap {
@@ -1155,7 +1233,6 @@ function Style() {
         padding: 12px;
         border-bottom: 1px solid #e5e7eb;
         text-align: left;
-        vertical-align: middle;
       }
 
       th {
@@ -1220,33 +1297,21 @@ function Style() {
         color: #2563eb;
       }
 
-      @media (max-width: 900px) {
-        .grid4 {
-          grid-template-columns: repeat(2, 1fr);
-        }
-
+      @media (max-width: 700px) {
         .header {
           flex-direction: column;
           align-items: flex-start;
           gap: 10px;
         }
-      }
 
-      @media (max-width: 600px) {
         .grid4 {
           grid-template-columns: 1fr;
         }
 
+        .panel,
+        .card,
         .loginCard {
-          padding: 24px;
-        }
-
-        .panel {
-          padding: 16px;
-        }
-
-        .card {
-          padding: 16px;
+          padding: 18px;
         }
 
         .toast {
